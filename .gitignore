@@ -1,0 +1,26 @@
+node_modules/
+
+# Build output: rebuilt by `pnpm run build` and on `pnpm pack`/publish.
+dist/
+
+# API keys. The example file is committed, the real one never is.
+.env
+.env.*
+!.env.example
+
+# Local configuration.
+config.json
+llm-proxy.config.json
+
+# Persisted counters and cooldowns.
+*.stats.json
+
+# Background service: pid/port of the running instance, its output, and the
+# copy of the CLI it runs from.
+daemon.json
+daemon.log
+service/
+
+*.log
+coverage/
+.DS_Store

@@ -1,0 +1,48 @@
+{
+  "about": [
+    "Default provider and model catalogue shipped with llm-failover-proxy.",
+    "Models are listed in failover priority order: the first one is tried first.",
+    "No secret here — each provider names the environment variable holding its",
+    "key, which the proxy reads from the real environment or from a .env file.",
+    "Edit this file to change what a fresh install starts with, then run",
+    "`pnpm run env:example` to refresh .env.example."
+  ],
+  "providers": [
+    {
+      "name": "nvidia",
+      "type": "openai",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "envVar": "NVIDIA_API_KEY",
+      "keyUrl": "https://build.nvidia.com",
+      "note": "free API credits, large open-weight models"
+    },
+    {
+      "name": "opencode",
+      "type": "openai",
+      "baseUrl": "https://opencode.ai/zen/v1",
+      "envVar": "OPENCODE_API_KEY",
+      "keyUrl": "https://opencode.ai/auth",
+      "note": "OpenCode Zen, several free models"
+    },
+    {
+      "name": "openrouter",
+      "type": "openai",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "envVar": "OPENROUTER_API_KEY",
+      "keyUrl": "https://openrouter.ai/keys",
+      "note": "hundreds of models; the :free ones need no credit"
+    }
+  ],
+  "models": [
+    { "provider": "nvidia", "model": "z-ai/glm-5.2" },
+    { "provider": "opencode", "model": "laguna-s-2.1-free" },
+    { "provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro" },
+    { "provider": "nvidia", "model": "minimaxai/minimax-m3" },
+    { "provider": "opencode", "model": "big-pickle" },
+    { "provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
+    { "provider": "opencode", "model": "deepseek-v4-flash-free" },
+    { "provider": "nvidia", "model": "stepfun-ai/step-3.7-flash" },
+    { "provider": "opencode", "model": "mimo-v2.5-free" },
+    { "provider": "opencode", "model": "ling-3.0-flash-free" }
+  ]
+}

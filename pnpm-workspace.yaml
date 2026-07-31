@@ -1,0 +1,8 @@
+# pnpm 10+ reads project settings from this file rather than from package.json.
+#
+# esbuild links its platform binary from an install script, so it needs explicit
+# approval. It is a build-time tool only: nothing in devDependencies reaches
+# published installs, since the published package is a single bundled file with
+# no runtime dependencies.
+allowBuilds:
+  esbuild: true

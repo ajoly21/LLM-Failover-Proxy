@@ -1,0 +1,2 @@
+# Normalise line endings: the repository stores LF, checkouts follow the platform.
+* text=auto eol=lf

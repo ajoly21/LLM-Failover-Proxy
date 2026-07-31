@@ -1,0 +1,70 @@
+{
+  "name": "llm-failover-proxy",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible LLM proxy with automatic provider failover, streaming support, and a terminal UI to manage providers, models and priority order.",
+  "keywords": [
+    "llm",
+    "openai",
+    "openai-compatible",
+    "proxy",
+    "gateway",
+    "failover",
+    "fallback",
+    "streaming",
+    "sse",
+    "anthropic",
+    "openrouter",
+    "ollama",
+    "rate-limit",
+    "tui",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Antoine Joly",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ajoly21/LLM-Failover-Proxy.git"
+  },
+  "homepage": "https://github.com/ajoly21/LLM-Failover-Proxy#readme",
+  "bugs": "https://github.com/ajoly21/LLM-Failover-Proxy/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.3.0",
+  "bin": {
+    "llm-failover-proxy": "dist/index.js",
+    "llmfp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "defaults",
+    "scripts/postinstall.js",
+    "scripts/preuninstall.js",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node src/index.js start",
+    "ui": "node src/index.js",
+    "status": "node src/index.js status",
+    "env:example": "node scripts/gen-env-example.js",
+    "demo": "node examples/demo.js",
+    "test": "node --test",
+    "prepack": "node scripts/build.js",
+    "postinstall": "node scripts/postinstall.js",
+    "preuninstall": "node scripts/preuninstall.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "ink": "^7.1.1",
+    "ink-testing-library": "^4.0.0",
+    "react": "^19.2.8"
+  }
+}
