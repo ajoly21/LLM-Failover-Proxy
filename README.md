@@ -265,31 +265,50 @@ Everything below is in the UI under `3. Settings`, where each line explains itse
 | `server.cors` | `true` | whether a web page may call the proxy straight from the browser |
 | `server.logLevel` | `info` | `debug` prints every attempt and its timing |
 
-### How long a model gets
+### While one request is in flight
 
-Three different deadlines, because "too slow" means different things before and during an answer. Each one, when it expires, drops that attempt and moves to the next model.
+There are several timers because "too slow" means different things before, during and after an answer starts. They all belong to **one** request, and they all end the same way: that attempt is dropped and the next model is tried.
+
+```
+  ask model 1 ────────────────────────────────────────────►
+              │                    │
+              │ hedgeDelayMs (5s)  │ nothing usable yet?
+              │                    └─► also ask model 2, in parallel
+              │
+              ├─ streaming?     firstTokenTimeoutMs (15s) until the first token
+              │                 then idleTimeoutMs (60s) between any two tokens
+              └─ not streaming? requestTimeoutMs (15s) for the whole answer
+```
 
 | Key | Default | Expires when |
 |---|---|---|
-| `requestTimeoutMs` | 15000 | a non-streamed answer has not arrived **complete** |
 | `firstTokenTimeoutMs` | 15000 | a streamed answer has not **started** |
-| `idleTimeoutMs` | 60000 | a started stream has gone **quiet** for that long |
+| `idleTimeoutMs` | 60000 | a started stream has gone **quiet** that long |
+| `requestTimeoutMs` | 15000 | a non-streamed answer has not arrived **complete** |
+| `hedgeDelayMs` | 5000 | your favourite model has had that long alone — the next one is asked too, and the first usable answer wins. `0` = strictly one at a time |
+| `maxInFlight` | 3 | how many models may work on that request at once. `1` disables racing. Every loser still generated tokens you may be billed for |
+| `maxAttempts` | 0 | how many models to try before giving up. `0` = the whole chain |
 
-And one deadline that has nothing to do with serving requests:
+Only one of the first three applies to a given request: the first two if the client asked for a stream, the third otherwise.
 
-| Key | Default | Expires when |
-|---|---|---|
-| `probe.timeoutMs` | 15000 | a **test you started yourself** (`t` on the Models screen, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+### Afterwards, for the next requests
 
-### Trying several models
+A **cooldown is not a timeout.** A timeout ends one attempt; a cooldown decides how long a model that keeps failing is *skipped by the requests that follow*, so a dead provider is not retried on every single call.
 
 | Key | Default | What it does |
 |---|---|---|
-| `hedgeDelayMs` | 5000 | how long your favourite model gets alone before the next one is asked **in parallel**. `0` = strictly one at a time |
-| `maxInFlight` | 3 | how many models may work on the same request at once. `1` disables racing. Every loser still generated tokens you may be billed for |
-| `maxAttempts` | 0 | how many models to try before giving up. `0` = the whole chain |
-| `cooldown.failuresBeforeTrip` | 2 | consecutive failures before a model is set aside. A `429` or an auth error sets it aside immediately, whatever this says |
-| `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long that lasts: doubling with each new failure, from the first value up to the second. A `Retry-After` from the provider wins over both. Any success resets it |
+| `cooldown.failuresBeforeTrip` | 2 | consecutive failures that put a model aside. A `429` or an auth error puts it aside immediately, whatever this says |
+| `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long it stays aside: `baseMs` the first time, doubling with each new failure, capped at `maxMs`. A `Retry-After` from the provider wins over both. Any success clears it |
+
+A model set aside is still tried as a **last resort** when nothing else is available, and the remaining time shows up in the `BENCHED` column of `llmfp stats`.
+
+### Tests you run yourself
+
+| Key | Default | Expires when |
+|---|---|---|
+| `probe.timeoutMs` | 15000 | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+
+Deliberately separate from the deadlines above: letting a slow model finish a benchmark should not make every real request wait longer.
 
 ### When to substitute, and when to refuse
 
@@ -330,7 +349,7 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 ```bash
 git clone <this repo> && cd llm-failover-proxy
 pnpm install
-pnpm test              # 87 tests, no network access
+pnpm test              # 88 tests, no network access
 node src/index.js      # run from source, no build step
 pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers

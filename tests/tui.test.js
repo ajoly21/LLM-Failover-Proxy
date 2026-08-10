@@ -448,6 +448,32 @@ test('every setting explains itself, and every yes/no spells out both answers', 
   }
 });
 
+test('settings are grouped by moment, and the groups never come back', async () => {
+  // Contiguity is what makes a heading mean something: a section reappearing
+  // lower down would tell the reader those timers are unrelated when they are.
+  const groups = [];
+  let last = null;
+  for (const setting of SETTINGS) {
+    assert.ok(setting.section, `${setting.label}: no section`);
+    if (setting.section !== last) groups.push(setting.section);
+    last = setting.section;
+  }
+  assert.deepEqual(groups, [...new Set(groups)], 'a section must appear once, in one block');
+
+  const app = await mount({ view: { name: 'settings' } });
+  try {
+    assert.match(app.frame(), /Where it listens/);
+    assert.match(app.frame(), /While one request is in flight/);
+    assert.match(app.frame(), /\d+-\d+ of \d+/, 'the list is windowed, not clipped');
+
+    await app.press(KEY.down, SETTINGS.length - 1); // walk to the far end
+    assert.match(app.frame(), /Afterwards, for the next requests/, 'the cooldown group says it is about later requests');
+    assert.match(app.frame(), /Tests you run yourself/);
+  } finally {
+    await app.close();
+  }
+});
+
 test('the settings help marks the answer currently in force', async () => {
   const app = await mount({ view: { name: 'settings' } });
   try {

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { h } from '../h.js';
-import { COLOR, SYMBOL, cell } from '../theme.js';
+import { COLOR, SYMBOL, cell, windowAround } from '../theme.js';
 import { Frame, Hints, TextField, editText } from '../widgets.js';
 import { maskSecret } from '../../config.js';
 
@@ -14,8 +14,25 @@ import { maskSecret } from '../../config.js';
  * current one is marked) or `example` gives the one thing worth knowing about
  * the value. Nobody should have to open the README to understand a line here.
  */
+/**
+ * The five groups, in the order a request lives through them. The cooldown one
+ * is deliberately worded to say what the timeouts above do not: it is about the
+ * requests that come *after* the one that failed.
+ */
+const SECTIONS = {
+  server: 'Where it listens',
+  request: 'While one request is in flight',
+  failure: 'When a model fails or is unknown',
+  cooldown: 'Afterwards, for the next requests',
+  tools: 'Tests you run yourself',
+};
+
+/** Rows visible at once; the rest scrolls with the cursor. */
+const MAX_ROWS = 12;
+
 export const SETTINGS = [
   {
+    section: 'server',
     label: 'listen host',
     type: 'text',
     hint: 'Address the proxy answers on.',
@@ -24,6 +41,7 @@ export const SETTINGS = [
     set: (c, v) => { c.server.host = v || '127.0.0.1'; },
   },
   {
+    section: 'server',
     label: 'preferred port',
     type: 'number',
     hint: 'Port your apps point at: http://host:port/v1',
@@ -32,6 +50,7 @@ export const SETTINGS = [
     set: (c, v) => { c.server.port = clamp(v, 1024, 65535, 47821); },
   },
   {
+    section: 'server',
     label: 'proxy API key',
     type: 'secret',
     hint: 'Key your own apps must send to be allowed through.',
@@ -41,6 +60,7 @@ export const SETTINGS = [
     mask: true,
   },
   {
+    section: 'server',
     label: 'log level',
     type: 'cycle',
     options: ['debug', 'info', 'warn', 'error'],
@@ -50,6 +70,7 @@ export const SETTINGS = [
     set: (c, v) => { c.server.logLevel = v; },
   },
   {
+    section: 'server',
     label: 'CORS',
     type: 'boolean',
     hint: 'Should a web page be able to call the proxy straight from the browser?',
@@ -61,51 +82,47 @@ export const SETTINGS = [
     set: (c, v) => { c.server.cors = v; },
   },
   {
+    section: 'request',
     label: 'request timeout (non-stream)',
     type: 'number',
     unit: 'ms',
-    hint: 'Time a model gets to deliver a complete, non-streamed answer.',
-    example: 'past this the attempt is dropped and the next model is tried',
+    hint: 'Non-streamed request: the complete answer must arrive within this.',
+    example: 'past it the attempt is dropped and the next model is tried',
     get: (c) => c.failover.requestTimeoutMs,
     set: (c, v) => { c.failover.requestTimeoutMs = clamp(v, 1000, 600000, 15000); },
   },
   {
+    section: 'request',
     label: 'first-token timeout (stream)',
     type: 'number',
     unit: 'ms',
-    hint: 'Time a model gets to start answering, when streaming.',
-    example: 'a model that stays silent this long is treated as broken, not as slow',
+    hint: 'Streamed request: the first token must arrive within this.',
+    example: 'a model still silent by then is treated as broken, not as slow',
     get: (c) => c.failover.firstTokenTimeoutMs,
     set: (c, v) => { c.failover.firstTokenTimeoutMs = clamp(v, 1000, 600000, 15000); },
   },
   {
+    section: 'request',
     label: 'idle timeout inside a stream',
     type: 'number',
     unit: 'ms',
-    hint: 'Longest silence allowed once an answer has started.',
-    example: 'catches a provider that stalls halfway through',
+    hint: 'Streamed request, once started: longest gap between two tokens.',
+    example: 'catches a provider that stalls halfway through an answer',
     get: (c) => c.failover.idleTimeoutMs,
     set: (c, v) => { c.failover.idleTimeoutMs = clamp(v, 1000, 600000, 60000); },
   },
   {
-    label: 'model test timeout',
-    type: 'number',
-    unit: 'ms',
-    hint: 'How long one model may take when you test the chain from Models & priority.',
-    example: 'only for the tests you run yourself; the deadlines above govern real requests',
-    get: (c) => c.probe.timeoutMs,
-    set: (c, v) => { c.probe.timeoutMs = clamp(v, 1000, 300000, 15000); },
-  },
-  {
+    section: 'request',
     label: 'hedge delay',
     type: 'number',
     unit: 'ms',
-    hint: 'Wait this long for your favourite model, then ask the next one in parallel.',
+    hint: 'Same request: how long the favourite gets alone before the next is asked too.',
     example: 'the first usable answer wins, the others are cancelled · 0 = one at a time',
     get: (c) => c.failover.hedgeDelayMs,
     set: (c, v) => { c.failover.hedgeDelayMs = clamp(v, 0, 600000, 5000); },
   },
   {
+    section: 'request',
     label: 'max attempts in flight',
     type: 'number',
     hint: 'How many models may be working on the same request at once.',
@@ -114,6 +131,7 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.maxInFlight = clamp(v, 1, 10, 3); },
   },
   {
+    section: 'request',
     label: 'max attempts',
     type: 'number',
     hint: 'How many models to try before giving up on a request.',
@@ -122,6 +140,7 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.maxAttempts = clamp(v, 0, 100, 0); },
   },
   {
+    section: 'failure',
     label: 'fall back to other models',
     type: 'boolean',
     hint: 'The model that was asked for failed. May a different one answer?',
@@ -133,6 +152,7 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.crossModelFallback = v; },
   },
   {
+    section: 'failure',
     label: 'reject unknown model names',
     type: 'boolean',
     hint: 'A client asks for a model name that is nowhere in your chain.',
@@ -144,6 +164,7 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.strictModelMatch = v; },
   },
   {
+    section: 'failure',
     label: 'stream failures as a message',
     type: 'boolean',
     hint: 'Every model failed on a streamed request. What does the client receive?',
@@ -155,6 +176,7 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.streamErrorAsMessage = v; },
   },
   {
+    section: 'failure',
     label: 'content_filter counts as failure',
     type: 'boolean',
     hint: 'A provider cut the answer off for content reasons.',
@@ -166,30 +188,43 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.treatContentFilterAsFailure = v; },
   },
   {
+    section: 'cooldown',
     label: 'failures before benching',
     type: 'number',
-    hint: 'Consecutive failures before a model is set aside for a while.',
+    hint: 'Consecutive failures that put a model aside for the requests that follow.',
     example: 'a 429 or an auth error benches it immediately, whatever this says',
     get: (c) => c.failover.cooldown.failuresBeforeTrip,
     set: (c, v) => { c.failover.cooldown.failuresBeforeTrip = clamp(v, 1, 50, 2); },
   },
   {
+    section: 'cooldown',
     label: 'cooldown base',
     type: 'number',
     unit: 'ms',
-    hint: 'How long a model is skipped the first time it is benched.',
-    example: 'doubles with each new failure, up to the maximum below · any success resets it',
+    hint: 'How long a model is skipped once it has been put aside.',
+    example: 'doubles with each new failure, up to the maximum below · any success clears it',
     get: (c) => c.failover.cooldown.baseMs,
     set: (c, v) => { c.failover.cooldown.baseMs = clamp(v, 0, 3600000, 15000); },
   },
   {
+    section: 'cooldown',
     label: 'cooldown max',
     type: 'number',
     unit: 'ms',
-    hint: 'Longest a model can stay benched.',
+    hint: 'Longest a model can stay skipped, however often it fails.',
     example: 'a Retry-After sent by the provider wins over this',
     get: (c) => c.failover.cooldown.maxMs,
     set: (c, v) => { c.failover.cooldown.maxMs = clamp(v, 0, 3600000, 300000); },
+  },
+  {
+    section: 'tools',
+    label: 'model test timeout',
+    type: 'number',
+    unit: 'ms',
+    hint: 'Not a request: how long a test you started from Models & priority may take.',
+    example: 'only for the tests you run yourself; the deadlines above govern real requests',
+    get: (c) => c.probe.timeoutMs,
+    set: (c, v) => { c.probe.timeoutMs = clamp(v, 1000, 300000, 15000); },
   },
 ];
 
@@ -244,7 +279,7 @@ export function SettingsScreen({ config, update, notify, onBack }) {
     }
   });
 
-  const rows = SETTINGS.map((entry, index) => {
+  const row = (entry, index) => {
     const focused = index === cursor;
     const value = entry.get(config);
     let display;
@@ -267,7 +302,25 @@ export function SettingsScreen({ config, update, notify, onBack }) {
       h(Text, null, '  '),
       display,
     );
-  });
+  };
+
+  // Windowed, so the list cannot outgrow a short terminal, and headed by
+  // section, because "which of these five timers is this one" is the question
+  // the flat list never answered.
+  const { start, end } = windowAround(SETTINGS.length, cursor, MAX_ROWS);
+  const rows = [];
+  let shown = null;
+  for (let index = start; index < end; index += 1) {
+    const entry = SETTINGS[index];
+    if (entry.section !== shown) {
+      shown = entry.section;
+      rows.push(h(Text, { key: `section-${shown}`, color: COLOR.title, bold: true }, `  ${SECTIONS[shown]}`));
+    }
+    rows.push(row(entry, index));
+  }
+  if (start > 0 || end < SETTINGS.length) {
+    rows.push(h(Text, { key: 'window', dimColor: true }, `  … ${start + 1}-${end} of ${SETTINGS.length}`));
+  }
 
   const editable = setting.type === 'boolean' || setting.type === 'cycle';
 
