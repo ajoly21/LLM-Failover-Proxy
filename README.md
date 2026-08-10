@@ -253,25 +253,57 @@ The response is still marked as a failure for programs (`x-llm-proxy-failed: tru
 
 ## Settings
 
-From the UI (`3. Settings`) or straight in `config.json`:
+Everything below is in the UI under `3. Settings`, where each line explains itself and what flipping it would do, or straight in `config.json`. The defaults are meant to be left alone — reach for these when something specific bothers you.
 
-| Key                           | Default               | What it does                                                            |
-| ----------------------------- | --------------------- | ----------------------------------------------------------------------- |
-| `server.host` / `port`        | `127.0.0.1` / `47821` | where it listens; a free port is picked if that one is taken            |
-| `server.apiKey`               | none                  | require a key from apps using the proxy (`env:LLM_PROXY_API_KEY` works) |
-| `hedgeDelayMs`                | 5000                  | wait before also asking the next model (0 = strictly one at a time)     |
-| `maxInFlight`                 | 3                     | how many attempts may run at once (1 disables racing)                   |
-| `requestTimeoutMs`            | 15000                 | deadline for a non-streamed request                                     |
-| `firstTokenTimeoutMs`         | 15000                 | deadline before the first token                                         |
-| `idleTimeoutMs`               | 60000                 | longest silence allowed inside a stream                                 |
-| `crossModelFallback`          | `true`                | may fall back to models other than the one asked for                    |
-| `strictModelMatch`            | `false`               | unknown model name → `404` instead of the default chain                 |
-| `treatContentFilterAsFailure` | `true`                | treat censorship as a failure worth retrying elsewhere                  |
-| `streamErrorAsMessage`        | `true`                | explain a total failure inside the stream instead of a bare `502`       |
-| `cooldown.failuresBeforeTrip` | 2                     | failures before an entry is benched                                     |
-| `cooldown.baseMs` / `maxMs`   | 15000 / 300000        | how long benching lasts, at least and at most                           |
+### Where it listens
 
-It binds to `127.0.0.1`, so it is only reachable from your machine. To expose it on a network, change `host` **and** set `server.apiKey`.
+| Key | Default | What it does |
+|---|---|---|
+| `server.host` | `127.0.0.1` | `127.0.0.1` = this machine only. `0.0.0.0` exposes it to your network — **set `server.apiKey` first** |
+| `server.port` | `47821` | the port your apps point at. If it is taken, the next free one is used and printed at startup |
+| `server.apiKey` | none | key your own apps must send. Empty means no check, which is fine on `127.0.0.1`. `env:LLM_PROXY_API_KEY` keeps it in the `.env` |
+| `server.cors` | `true` | whether a web page may call the proxy straight from the browser |
+| `server.logLevel` | `info` | `debug` prints every attempt and its timing |
+
+### How long a model gets
+
+Three different deadlines, because "too slow" means different things before and during an answer. Each one, when it expires, drops that attempt and moves to the next model.
+
+| Key | Default | Expires when |
+|---|---|---|
+| `requestTimeoutMs` | 15000 | a non-streamed answer has not arrived **complete** |
+| `firstTokenTimeoutMs` | 15000 | a streamed answer has not **started** |
+| `idleTimeoutMs` | 60000 | a started stream has gone **quiet** for that long |
+
+### Trying several models
+
+| Key | Default | What it does |
+|---|---|---|
+| `hedgeDelayMs` | 5000 | how long your favourite model gets alone before the next one is asked **in parallel**. `0` = strictly one at a time |
+| `maxInFlight` | 3 | how many models may work on the same request at once. `1` disables racing. Every loser still generated tokens you may be billed for |
+| `maxAttempts` | 0 | how many models to try before giving up. `0` = the whole chain |
+| `cooldown.failuresBeforeTrip` | 2 | consecutive failures before a model is set aside. A `429` or an auth error sets it aside immediately, whatever this says |
+| `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long that lasts: doubling with each new failure, from the first value up to the second. A `Retry-After` from the provider wins over both. Any success resets it |
+
+### When to substitute, and when to refuse
+
+These four decide whether the client gets *an* answer or *the* answer. This is where a proxy can help you or lie to you, so they are worth a minute.
+
+| Key | Default | The question it answers |
+|---|---|---|
+| `strictModelMatch` | `false` | A client asks for a model that is **nowhere in your chain**. `false`: the whole chain answers anyway — apps that hardcode `gpt-4o` just work. `true`: `404`, no provider is called |
+| `crossModelFallback` | `true` | The requested model is **known but failing**. `true`: the rest of the chain takes over. `false`: the request fails rather than switch model |
+| `treatContentFilterAsFailure` | `true` | A provider cut the answer for content reasons. `true`: try another model. `false`: hand the refusal back as it came |
+| `streamErrorAsMessage` | `true` | Every model failed on a streamed request. `true`: the reason is streamed as a readable answer. `false`: a bare `502`, which most chat apps render as an empty reply |
+
+The first two are often confused. They act at different moments:
+
+```
+client asks for "typo-3.5"          →  strictModelMatch decides    (unknown name)
+client asks for "fast", fast is 500 →  crossModelFallback decides  (known, failing)
+```
+
+So for **"never serve me anything other than what I asked for"**, you need both: `strictModelMatch: true` *and* `crossModelFallback: false`. With the defaults, the opposite is true — something always tries to answer, and the `x-llm-proxy-model` header tells you who actually did.
 
 ## Troubleshooting
 
@@ -292,7 +324,7 @@ It binds to `127.0.0.1`, so it is only reachable from your machine. To expose it
 ```bash
 git clone <this repo> && cd llm-failover-proxy
 pnpm install
-pnpm test              # 82 tests, no network access
+pnpm test              # 84 tests, no network access
 node src/index.js      # run from source, no build step
 pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers

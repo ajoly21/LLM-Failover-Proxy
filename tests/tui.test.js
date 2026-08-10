@@ -8,6 +8,7 @@ import { h } from '../src/tui/h.js';
 import { App } from '../src/tui/app.js';
 import { loadConfig } from '../src/config.js';
 import { resetEnvCache } from '../src/env.js';
+import { SETTINGS } from '../src/tui/screens/settings.js';
 import { startMock } from './mock-provider.js';
 
 // Built from code points: raw control bytes in a source file are invisible and
@@ -419,6 +420,49 @@ test('settings toggle booleans, cycle enums and edit numbers in place', async ()
     await app.press(' ');
     await tick();
     assert.equal(app.config().server.cors, false);
+  } finally {
+    await app.close();
+  }
+});
+
+test('every setting explains itself, and every yes/no spells out both answers', () => {
+  // A setting nobody can understand from the screen is a setting nobody will
+  // touch on purpose — the explanation is part of the contract, not decoration.
+  for (const setting of SETTINGS) {
+    assert.ok(setting.hint?.length > 25, `${setting.label}: needs a hint saying what it decides`);
+    assert.ok(setting.hint.length <= 90, `${setting.label}: hint too long for a terminal line`);
+
+    if (setting.type === 'boolean') {
+      assert.deepEqual(
+        setting.choices?.map(([answer]) => answer),
+        ['yes', 'no'],
+        `${setting.label}: both answers must be spelled out, in that order`,
+      );
+      for (const [answer, meaning] of setting.choices) {
+        assert.ok(meaning.length > 10 && meaning.length <= 80, `${setting.label}/${answer}: unhelpful or too long`);
+      }
+    } else {
+      assert.ok(setting.example?.length > 10, `${setting.label}: needs a concrete note about the value`);
+      assert.ok(setting.example.length <= 95, `${setting.label}: note too long for a terminal line`);
+    }
+  }
+});
+
+test('the settings help marks the answer currently in force', async () => {
+  const app = await mount({ view: { name: 'settings' } });
+  try {
+    await app.press(KEY.down, SETTINGS.findIndex((setting) => setting.label === 'reject unknown model names'));
+
+    let frame = app.frame();
+    assert.match(frame, /A client asks for a model name that is nowhere in your chain/);
+    assert.match(frame, /yes\s+HTTP 404 straight away/);
+    assert.match(frame, /▸ no\s+the whole chain answers/, 'the current answer is the one marked');
+
+    await app.press(KEY.right); // no → yes
+    assert.equal(app.config().failover.strictModelMatch, true);
+    frame = app.frame();
+    assert.match(frame, /▸ yes\s+HTTP 404 straight away/, 'the mark follows the value');
+    assert.doesNotMatch(frame, /▸ no\s+the whole chain/);
   } finally {
     await app.close();
   }
