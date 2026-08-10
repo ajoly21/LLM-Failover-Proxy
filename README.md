@@ -1,6 +1,6 @@
 # llm-failover-proxy
 
-**One local endpoint for all your LLM providers. When a model fails, the next one answers — your app never notices.**
+**One local endpoint for all your LLM providers. When a model fails, the next one answers, your app never notices.**
 
 Point any OpenAI-compatible app at `http://127.0.0.1:47821/v1` and forget about it. Behind that address sits a chain of models you ordered by preference. A model that errors, hits a rate limit, returns an empty answer or simply goes quiet is skipped, and the next one takes over mid-request, invisibly.
 
@@ -11,7 +11,7 @@ npm i -g llm-failover-proxy      # installs it, starts it, keeps it running
 llm-failover-proxy               # paste your API keys
 ```
 
-Needs [Node.js](https://nodejs.org) 22 or newer. Downloads **one package, ~190 kB** — no dependency tree.
+Needs [Node.js](https://nodejs.org) 22 or newer. Downloads **one package, ~190 kB**, no dependency tree.
 
 ---
 
@@ -24,11 +24,11 @@ npm i -g llm-failover-proxy
 That single command:
 
 1. writes a **default chain** of models (see [`defaults/catalog.json`](defaults/catalog.json)) so there is something to serve,
-2. **starts the proxy in the background** — no terminal to keep open,
+2. **starts the proxy in the background**, no terminal to keep open,
 3. registers it to **start again at every login** (Startup folder on Windows, LaunchAgent on macOS, systemd user unit on Linux),
 4. tells you which API keys are still missing.
 
-npm hides what install scripts print, so that step is silent — `llm-failover-proxy status` shows what happened (add `--foreground-scripts` to the install command to watch it live).
+npm hides what install scripts print, so that step is silent, `llm-failover-proxy status` shows what happened (add `--foreground-scripts` to the install command to watch it live).
 
 Then run the wizard to paste your keys:
 
@@ -53,15 +53,15 @@ llm-failover-proxy
  ↑↓ move · enter choose · esc skip
 ```
 
-It then asks for one key per provider, showing where to get each one. **Press enter to skip any of them** — a provider with no key is simply stepped over in the chain. Keys are saved to a `.env`; the configuration file only ever stores the *name* of the variable, so it stays safe to share.
+It then asks for one key per provider, showing where to get each one. **Press enter to skip any of them**, a provider with no key is simply stepped over in the chain. Keys are saved to a `.env`; the configuration file only ever stores the _name_ of the variable, so it stays safe to share.
 
-Nothing to install permanently? Use `npx llm-failover-proxy` instead — same tool, no background service and no login entry.
+Nothing to install permanently? Use `npx llm-failover-proxy` instead, same tool, no background service and no login entry.
 
 <details>
 <summary>Not installing globally, or would rather nothing started on its own</summary>
 
 - `npm i llm-failover-proxy` (as a project dependency) starts the background proxy but **does not** add a login entry: the path would vanish with `node_modules`. Add it yourself with `llm-failover-proxy enable`.
-- **pnpm** blocks install scripts by default, so nothing starts on its own — run `llm-failover-proxy enable` (or `pnpm approve-builds`) when you do want it.
+- **pnpm** blocks install scripts by default, so nothing starts on its own, run `llm-failover-proxy enable` (or `pnpm approve-builds`) when you do want it.
 - `LLM_PROXY_NO_AUTOSTART=1 npm i -g llm-failover-proxy` installs the command and touches nothing else.
 - `CI=1` (set automatically by every CI provider) also skips it.
 - `llm-failover-proxy disable` undoes everything: no login entry, no running process.
@@ -69,7 +69,7 @@ Nothing to install permanently? Use `npx llm-failover-proxy` instead — same to
 
 ## Use it
 
-The proxy speaks the OpenAI API, so anything that talks to OpenAI works unchanged — just point it at the local address and use any non-empty API key.
+The proxy speaks the OpenAI API, so anything that talks to OpenAI works unchanged, just point it at the local address and use any non-empty API key.
 
 ```bash
 curl http://127.0.0.1:47821/v1/chat/completions \
@@ -88,28 +88,28 @@ print(client.chat.completions.create(
 ```
 
 ```js
-import OpenAI from 'openai';
-const client = new OpenAI({ baseURL: 'http://127.0.0.1:47821/v1', apiKey: 'unused' });
+import OpenAI from "openai";
+const client = new OpenAI({ baseURL: "http://127.0.0.1:47821/v1", apiKey: "unused" });
 ```
 
 In an app that asks for settings (Cursor, Continue, Open WebUI, Zed, LibreChat…), fill in:
 
-| Field | Value |
-|---|---|
-| Base URL / API host | `http://127.0.0.1:47821/v1` |
-| API key | anything, e.g. `unused` (unless you set one — see [Settings](#settings)) |
-| Model | `auto` |
+| Field               | Value                                                                   |
+| ------------------- | ----------------------------------------------------------------------- |
+| Base URL / API host | `http://127.0.0.1:47821/v1`                                             |
+| API key             | anything, e.g. `unused` (unless you set one, see [Settings](#settings)) |
+| Model               | `auto`                                                                  |
 
 Streaming, tools/function calling, vision, JSON mode and embeddings all pass straight through.
 
 ### Which model name to ask for
 
-| You send | What happens |
-|---|---|
-| `auto` (or nothing) | your whole chain, in priority order — **the usual choice** |
-| an **alias** | entries with that alias first, then the rest of the chain as backup |
-| `provider/model` | that exact entry first, then the rest of the chain |
-| something unknown | falls back to the default chain |
+| You send            | What happens                                                        |
+| ------------------- | ------------------------------------------------------------------- |
+| `auto` (or nothing) | your whole chain, in priority order, **the usual choice**           |
+| an **alias**        | entries with that alias first, then the rest of the chain as backup |
+| `provider/model`    | that exact entry first, then the rest of the chain                  |
+| something unknown   | falls back to the default chain                                     |
 
 Giving several entries the same alias makes a **failover group**: `fast` can mean one provider, then another, then a local model, in that order. `GET /v1/models` lists what is available.
 
@@ -134,11 +134,11 @@ llm-failover-proxy migrate      move keys out of the config file into the .env
 
 `llmfp` is a shorter alias for the same command. Add `--config <path>` to work on another configuration, `--port`/`--host` to change where it listens.
 
-`stats` prints once and returns — the *Status & stats* screen of the UI is the live one, refreshing every two seconds until you leave it. Use `stats` in a script or when you just want a number back, and `stats --json` to pipe it somewhere. Counters are read from the running proxy when there is one, and from the file on disk when there is not, so the numbers are there even after a restart:
+`stats` prints once and returns, the _Status & stats_ screen of the UI is the live one, refreshing every two seconds until you leave it. Use `stats` in a script or when you just want a number back, and `stats --json` to pipe it somewhere. Counters are read from the running proxy when there is one, and from the file on disk when there is not, so the numbers are there even after a restart:
 
 ```
 $ llmfp stats
-Persisted counters (nothing running — read from disk)
+Persisted counters (nothing running, read from disk)
   kept since 2026-08-10 09:12 · 6 request(s), 3 ok, 0 failed, 3 cancelled, 51.9k token(s)
   PRIO  TARGET                       REQ  OK  KO  CX  TOKENS  LAST LATENCY  BENCHED  LAST ERROR
   1     nvidia/z-ai/glm-5.2          3    0   0   3   0       -             -        -
@@ -164,63 +164,63 @@ Persisted counters (nothing running — read from disk)
  ↑↓ move · enter open · 1-7 jump · q quit
 ```
 
-Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/disable, `d` delete, `t` test, `esc` back. Changes are saved immediately, and a proxy already running in the background picks them up — no restart, not even for a key you just pasted.
+Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/disable, `d` delete, `t` test, `esc` back. Changes are saved immediately, and a proxy already running in the background picks them up, no restart, not even for a key you just pasted.
 
-**Providers** — ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
+**Providers**, ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
 
-**Models & priority** — the chain, in failover order. `⇧↑`/`⇧↓` (or `J`/`K`) move a model up or down.
+**Models & priority**, the chain, in failover order. `⇧↑`/`⇧↓` (or `J`/`K`) move a model up or down.
 
-**Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel — a model taking 30 seconds only delays its own row.
+**Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row.
 
 ```
-  #  ALIAS  PROVIDER    MODEL                ON     TTFT   TOK/S   TOK
-▸ 1  fast   groq        llama-3.3-70b        ●   ✓   412ms   85.3    64
-  2  big    openrouter  nemotron-3-ultra     ●   ⋯       -       -     -
-  3  local  ollama      qwen3:8b             ●   ✗       -       -     -
+  #  ALIAS  PROVIDER    MODEL                ON     TTFT   TOK/S
+▸ 1  fast   groq        llama-3.3-70b        ●   ✓   412ms   85.3
+  2  big    openrouter  nemotron-3-ultra     ●   ⋯       -       -
+  3  local  ollama      qwen3:8b             ●   ✗       -       -
 ```
 
-`TTFT` is the wait before the first token, `TOK/S` the speed after it. `TOK` is prefixed with `~` when the provider reports no usage and the count comes from the chunks themselves.
+`TTFT` is the wait before the first token, `TOK/S` the speed after it — the two numbers that tell you whether a model is worth its place in the chain. Token totals live in the counters (`llmfp stats`), where they add up over time.
 
 ## Where your settings live
 
-Two files, side by side — **configuration** and **secrets** are deliberately kept apart:
+Two files, side by side, **configuration** and **secrets** are deliberately kept apart:
 
-| File | Contents | Commit it? |
-|---|---|---|
-| `config.json` | providers, models, priority order, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references | yes, if you want |
-| `.env` | the actual API keys, one per line, `0600` | **never** |
-| `.env.example` | the variables the default chain expects, with links to get each key | shipped with the package |
-| `<config>.stats.json` | counters and cooldowns, so they survive restarts | no |
-| `daemon.log`, `daemon.json`, `service/` | the background proxy: its output, its pid and port, and the copy of the CLI it runs (so uninstalling is never blocked by a file in use) | no |
+| File                                    | Contents                                                                                                                                | Commit it?               |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `config.json`                           | providers, models, priority order, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                                        | yes, if you want         |
+| `.env`                                  | the actual API keys, one per line, `0600`                                                                                               | **never**                |
+| `.env.example`                          | the variables the default chain expects, with links to get each key                                                                     | shipped with the package |
+| `<config>.stats.json`                   | counters and cooldowns, so they survive restarts                                                                                        | no                       |
+| `daemon.log`, `daemon.json`, `service/` | the background proxy: its output, its pid and port, and the copy of the CLI it runs (so uninstalling is never blocked by a file in use) | no                       |
 
 The configuration file is looked up in this order: `--config <path>`, `$LLM_PROXY_CONFIG`, `./llm-proxy.config.json` or `./config.json`, then `%APPDATA%\llm-failover-proxy\config.json` (Windows) / `${XDG_CONFIG_HOME:-~/.config}/llm-failover-proxy/config.json`.
 
-The `.env` is read from the current directory **and** from the folder holding the configuration file, so both a project-local and a machine-wide setup work. A real environment variable always wins over the file — handy in Docker or CI, where you can skip the `.env` entirely and just pass `NVIDIA_API_KEY=…`.
+The `.env` is read from the current directory **and** from the folder holding the configuration file, so both a project-local and a machine-wide setup work. A real environment variable always wins over the file, handy in Docker or CI, where you can skip the `.env` entirely and just pass `NVIDIA_API_KEY=…`.
 
 Upgrading from an older version that stored keys inside `config.json`? `llm-failover-proxy migrate` moves them to the `.env` and leaves `env:` references behind. `status` reminds you if any are left.
 
 ### Changing the default chain
 
-The chain a fresh install starts with is plain JSON in [`defaults/catalog.json`](defaults/catalog.json): providers, the variable holding each key, and the models in priority order. Edit it, run `pnpm run env:example` to refresh `.env.example`, and every new install starts from your list. Existing installs are never overwritten — re-running the wizard only *adds* what is missing.
+The chain a fresh install starts with is plain JSON in [`defaults/catalog.json`](defaults/catalog.json): providers, the variable holding each key, and the models in priority order. Edit it, run `pnpm run env:example` to refresh `.env.example`, and every new install starts from your list. Existing installs are never overwritten, re-running the wizard only _adds_ what is missing.
 
 ## When things go wrong
 
 That is the whole point of this proxy. What counts as a failure worth switching provider for:
 
-| Situation | How it is detected |
-|---|---|
-| HTTP error | any non-2xx (429, 5xx, 401/403, plain 4xx) |
-| Rate limit | `429` → benched for as long as `Retry-After` says |
-| Network, DNS or TLS failure | connection error |
-| Silence | no answer (15 s), no first token (15 s), stalled stream (60 s) |
-| Empty answer | no text, no `tool_calls`, no reasoning — streaming included |
-| Unusable answer | invalid JSON, `{"error":…}` served with a `200`, missing `choices` |
-| Censorship | `finish_reason: content_filter` (can be turned off) |
-| Missing key | unresolved `env:VAR` → skipped without a network call |
+| Situation                   | How it is detected                                                 |
+| --------------------------- | ------------------------------------------------------------------ |
+| HTTP error                  | any non-2xx (429, 5xx, 401/403, plain 4xx)                         |
+| Rate limit                  | `429` → benched for as long as `Retry-After` says                  |
+| Network, DNS or TLS failure | connection error                                                   |
+| Silence                     | no answer (15 s), no first token (15 s), stalled stream (60 s)     |
+| Empty answer                | no text, no `tool_calls`, no reasoning, streaming included         |
+| Unusable answer             | invalid JSON, `{"error":…}` served with a `200`, missing `choices` |
+| Censorship                  | `finish_reason: content_filter` (can be turned off)                |
+| Missing key                 | unresolved `env:VAR` → skipped without a network call              |
 
-**While streaming, nothing reaches your app before the first genuinely usable chunk.** Until then, failover is completely silent: even with three attempts in flight, only one answer is ever forwarded. If a stream breaks *after* the first token, replaying it elsewhere would produce an incoherent answer, so it is closed cleanly with an explicit error instead.
+**While streaming, nothing reaches your app before the first genuinely usable chunk.** Until then, failover is completely silent: even with three attempts in flight, only one answer is ever forwarded. If a stream breaks _after_ the first token, replaying it elsewhere would produce an incoherent answer, so it is closed cleanly with an explicit error instead.
 
-**Repeat offenders are benched.** After two consecutive failures an entry is put on a cooldown that grows with each failure (15 s → 5 min); a `429` or an auth error benches it immediately. Benched entries are skipped — but still tried as a last resort if the whole chain is down, because trying beats failing. Any success clears the record. Counters and cooldowns are on disk, so a provider benched for 5 minutes stays benched across a restart.
+**Repeat offenders are benched.** After two consecutive failures an entry is put on a cooldown that grows with each failure (15 s → 5 min); a `429` or an auth error benches it immediately. Benched entries are skipped, but still tried as a last resort if the whole chain is down, because trying beats failing. Any success clears the record. Counters and cooldowns are on disk, so a provider benched for 5 minutes stays benched across a restart.
 
 ### Racing the slow ones
 
@@ -231,9 +231,9 @@ t=6.2s   second-medium answers → the other attempt is dropped
          → 6.2s instead of 7s, and the preferred model still had first go
 ```
 
-`hedgeDelayMs` (5 s) controls the wait, `maxInFlight` (3) caps how many attempts can run at once. A **failure** does not wait for the timer — the next candidate starts at once. A dropped attempt is neither a success nor a failure: it says nothing about that provider, so it never counts against it (it shows up as `cancelled` in the stats).
+`hedgeDelayMs` (5 s) controls the wait, `maxInFlight` (3) caps how many attempts can run at once. A **failure** does not wait for the timer, the next candidate starts at once. A dropped attempt is neither a success nor a failure: it says nothing about that provider, so it never counts against it (it shows up as `cancelled` in the stats).
 
-**This costs tokens.** A provider that answers just after the winner still generated — and billed — its answer. Raise `hedgeDelayMs`, or set `maxInFlight: 1`, to trade latency for cost.
+**This costs tokens.** A provider that answers just after the winner still generated, and billed, its answer. Raise `hedgeDelayMs`, or set `maxInFlight: 1`, to trade latency for cost.
 
 ### When every model fails
 
@@ -242,9 +242,9 @@ Your app gets a real explanation instead of a silent error, streamed like a norm
 ```
 ⚠️  llm-failover-proxy: no provider could answer this request.
 
-  1. groq/llama-3.3-70b — rate_limited: HTTP 429 — rate limit reached
-  2. openrouter/nemotron-ultra — upstream_error: HTTP 500 — provider is down
-  3. ollama/qwen3:8b — empty_response: stream ended without usable content
+  1. groq/llama-3.3-70b, rate_limited: HTTP 429, rate limit reached
+  2. openrouter/nemotron-ultra, upstream_error: HTTP 500, provider is down
+  3. ollama/qwen3:8b, empty_response: stream ended without usable content
 
 Run `llm-failover-proxy status` or read the proxy logs for the full picture.
 ```
@@ -255,35 +255,35 @@ The response is still marked as a failure for programs (`x-llm-proxy-failed: tru
 
 From the UI (`3. Settings`) or straight in `config.json`:
 
-| Key | Default | What it does |
-|---|---|---|
-| `server.host` / `port` | `127.0.0.1` / `47821` | where it listens; a free port is picked if that one is taken |
-| `server.apiKey` | none | require a key from apps using the proxy (`env:LLM_PROXY_API_KEY` works) |
-| `hedgeDelayMs` | 5000 | wait before also asking the next model (0 = strictly one at a time) |
-| `maxInFlight` | 3 | how many attempts may run at once (1 disables racing) |
-| `requestTimeoutMs` | 15000 | deadline for a non-streamed request |
-| `firstTokenTimeoutMs` | 15000 | deadline before the first token |
-| `idleTimeoutMs` | 60000 | longest silence allowed inside a stream |
-| `crossModelFallback` | `true` | may fall back to models other than the one asked for |
-| `strictModelMatch` | `false` | unknown model name → `404` instead of the default chain |
-| `treatContentFilterAsFailure` | `true` | treat censorship as a failure worth retrying elsewhere |
-| `streamErrorAsMessage` | `true` | explain a total failure inside the stream instead of a bare `502` |
-| `cooldown.failuresBeforeTrip` | 2 | failures before an entry is benched |
-| `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long benching lasts, at least and at most |
+| Key                           | Default               | What it does                                                            |
+| ----------------------------- | --------------------- | ----------------------------------------------------------------------- |
+| `server.host` / `port`        | `127.0.0.1` / `47821` | where it listens; a free port is picked if that one is taken            |
+| `server.apiKey`               | none                  | require a key from apps using the proxy (`env:LLM_PROXY_API_KEY` works) |
+| `hedgeDelayMs`                | 5000                  | wait before also asking the next model (0 = strictly one at a time)     |
+| `maxInFlight`                 | 3                     | how many attempts may run at once (1 disables racing)                   |
+| `requestTimeoutMs`            | 15000                 | deadline for a non-streamed request                                     |
+| `firstTokenTimeoutMs`         | 15000                 | deadline before the first token                                         |
+| `idleTimeoutMs`               | 60000                 | longest silence allowed inside a stream                                 |
+| `crossModelFallback`          | `true`                | may fall back to models other than the one asked for                    |
+| `strictModelMatch`            | `false`               | unknown model name → `404` instead of the default chain                 |
+| `treatContentFilterAsFailure` | `true`                | treat censorship as a failure worth retrying elsewhere                  |
+| `streamErrorAsMessage`        | `true`                | explain a total failure inside the stream instead of a bare `502`       |
+| `cooldown.failuresBeforeTrip` | 2                     | failures before an entry is benched                                     |
+| `cooldown.baseMs` / `maxMs`   | 15000 / 300000        | how long benching lasts, at least and at most                           |
 
 It binds to `127.0.0.1`, so it is only reachable from your machine. To expose it on a network, change `host` **and** set `server.apiKey`.
 
 ## Troubleshooting
 
-**Every answer says "no provider could answer".** No usable key. Run `llm-failover-proxy status`: providers whose key is missing are shown in red. Paste keys with `llm-failover-proxy` (wizard, or Providers → `e`), or write them into the `.env` — a running proxy picks them up within a second.
+**Every answer says "no provider could answer".** No usable key. Run `llm-failover-proxy status`: providers whose key is missing are shown in red. Paste keys with `llm-failover-proxy` (wizard, or Providers → `e`), or write them into the `.env`, a running proxy picks them up within a second.
 
 **Is it actually running?** `llm-failover-proxy status` shows the process, its port and its counters; `curl http://127.0.0.1:47821/health` answers `200`. If a port was taken, the real one is in `status` and in `daemon.json`.
 
-**It did not come back after a reboot.** `llm-failover-proxy enable` (re-)registers it. The entry is a plain file you can inspect or delete: `…\Start Menu\Programs\Startup\llm-failover-proxy.vbs` on Windows, `~/Library/LaunchAgents/com.llm-failover-proxy.plist` on macOS, `~/.config/systemd/user/llm-failover-proxy.service` on Linux. On Linux, a user service normally waits for your first login — `loginctl enable-linger $USER` starts it at boot instead.
+**It did not come back after a reboot.** `llm-failover-proxy enable` (re-)registers it. The entry is a plain file you can inspect or delete: `…\Start Menu\Programs\Startup\llm-failover-proxy.vbs` on Windows, `~/Library/LaunchAgents/com.llm-failover-proxy.plist` on macOS, `~/.config/systemd/user/llm-failover-proxy.service` on Linux. On Linux, a user service normally waits for your first login, `loginctl enable-linger $USER` starts it at boot instead.
 
 **Something went wrong in the background.** `llm-failover-proxy logs` prints the end of the log (`daemon.log`, next to the configuration).
 
-**I want it gone.** `llm-failover-proxy disable`, then `npm rm -g llm-failover-proxy`. Either order works — uninstalling never fails because the proxy is running, and a login entry left behind by an uninstalled package removes itself the next time it fires. Your configuration and keys stay where they are.
+**I want it gone.** `llm-failover-proxy disable`, then `npm rm -g llm-failover-proxy`. Either order works, uninstalling never fails because the proxy is running, and a login entry left behind by an uninstalled package removes itself the next time it fires. Your configuration and keys stay where they are.
 
 **A provider needs a special header, or a fixed `max_tokens`.** Both are supported per provider and per model in `config.json` (`headers`, `params`).
 
@@ -298,9 +298,9 @@ pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers
 ```
 
-The proxy itself — server, router, adapters, config, stats — is **dependency-free plain ESM**. Ink and React are used by the terminal UI only, as devDependencies: the build tree-shakes them into a single `dist/index.js`, which is why installing costs one file and no dependency tree.
+The proxy itself, server, router, adapters, config, stats, is **dependency-free plain ESM**. Ink and React are used by the terminal UI only, as devDependencies: the build tree-shakes them into a single `dist/index.js`, which is why installing costs one file and no dependency tree.
 
-Two upstream protocols are supported per provider: **`openai`** (any OpenAI-compatible API, full pass-through of `tools`, `response_format`, vision and provider extensions) and **`anthropic`** (the Messages API, translated both ways — system prompt, `tools` ↔ `input_schema`, `tool_calls` ↔ `tool_use`, images, `stop_reason` ↔ `finish_reason`, streaming events → OpenAI chunks). Clients only ever see the OpenAI shape.
+Two upstream protocols are supported per provider: **`openai`** (any OpenAI-compatible API, full pass-through of `tools`, `response_format`, vision and provider extensions) and **`anthropic`** (the Messages API, translated both ways, system prompt, `tools` ↔ `input_schema`, `tool_calls` ↔ `tool_use`, images, `stop_reason` ↔ `finish_reason`, streaming events → OpenAI chunks). Clients only ever see the OpenAI shape.
 
 ```
 src/index.js               commands and options
@@ -319,7 +319,7 @@ defaults/catalog.json      the chain a fresh install starts with
 scripts/                   bundler, postinstall, .env.example generator
 ```
 
-The fake providers in `tests/mock-provider.js` simulate success, `500`, `429` + `Retry-After`, `401`, `400`, empty answers (JSON and SSE), invalid JSON, error-in-`200`, `content_filter`, a mid-stream drop, total silence, slow first tokens, the Anthropic protocol and embeddings. The suite covers streamed and non-streamed failover, the circuit breaker, racing (winner selection, cancellation accounting, concurrency cap), priority and alias selection, the Anthropic translation, authentication, `.env` handling, key migration, the default catalogue, the background service (a really detached process, its login entry, and stop), stats persistence across restarts, every UI screen through `ink-testing-library`, and the published bundle itself — including mounting its UI, which is the only way a broken bundle shows up.
+The fake providers in `tests/mock-provider.js` simulate success, `500`, `429` + `Retry-After`, `401`, `400`, empty answers (JSON and SSE), invalid JSON, error-in-`200`, `content_filter`, a mid-stream drop, total silence, slow first tokens, the Anthropic protocol and embeddings. The suite covers streamed and non-streamed failover, the circuit breaker, racing (winner selection, cancellation accounting, concurrency cap), priority and alias selection, the Anthropic translation, authentication, `.env` handling, key migration, the default catalogue, the background service (a really detached process, its login entry, and stop), stats persistence across restarts, every UI screen through `ink-testing-library`, and the published bundle itself, including mounting its UI, which is the only way a broken bundle shows up.
 
 ## License
 

@@ -35,28 +35,28 @@ function timestamp() {
 function emit(level, tag, args) {
   if (LEVELS[level] < threshold) return;
   const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
-  stream.write(`${timestamp()} ${tag} ${args.join(' ')}\n`);
+  stream.write(`${timestamp()} ${tag} ${args.join(" ")}\n`);
 }
 
 export const log = {
-  debug: (...args) => emit('debug', c.gray('debug'), args),
-  info: (...args) => emit('info', c.blue('info '), args),
-  warn: (...args) => emit('warn', c.yellow('warn '), args),
-  error: (...args) => emit('error', c.red('error'), args),
-  raw: (...args) => process.stdout.write(`${args.join(' ')}\n`),
+  debug: (...args) => emit("debug", c.gray("debug"), args),
+  info: (...args) => emit("info", c.blue("info "), args),
+  warn: (...args) => emit("warn", c.yellow("warn "), args),
+  error: (...args) => emit("error", c.red("error"), args),
+  raw: (...args) => process.stdout.write(`${args.join(" ")}\n`),
 };
 
 /** Human-friendly duration: `840ms`, `1.42s`. */
 export function ms(value) {
-  if (value == null) return '-';
+  if (value == null) return "-";
   return value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(2)}s`;
 }
 
 const SCALES = [
-  { limit: 1e3, suffix: 'k' },
-  { limit: 1e6, suffix: 'M' },
-  { limit: 1e9, suffix: 'B' },
-  { limit: 1e12, suffix: 'T' },
+  { limit: 1e3, suffix: "k" },
+  { limit: 1e6, suffix: "M" },
+  { limit: 1e9, suffix: "B" },
+  { limit: 1e12, suffix: "T" },
 ];
 
 /**
@@ -64,12 +64,12 @@ const SCALES = [
  *
  * Token totals and request counters grow without bound on a long-running proxy,
  * and they sit in fixed-width table columns. Exact values stay available in the
- * `/stats` JSON — this is for reading, not for accounting.
+ * `/stats` JSON, this is for reading, not for accounting.
  */
 export function compact(value) {
   const number = Number(value);
-  if (value == null || !Number.isFinite(number)) return '-';
-  const sign = number < 0 ? '-' : '';
+  if (value == null || !Number.isFinite(number)) return "-";
+  const sign = number < 0 ? "-" : "";
   const absolute = Math.abs(number);
   if (absolute < 999.5) return `${sign}${Math.round(absolute)}`;
 
@@ -78,7 +78,7 @@ export function compact(value) {
     // Roll over before a unit would print "1000k" instead of "1M".
     if (scaled >= 999.5 && index < SCALES.length - 1) continue;
     // One decimal below 100 (1.2k, 12.3k), none above (123k): narrow columns.
-    const text = scaled < 99.95 ? scaled.toFixed(1).replace(/\.0$/, '') : String(Math.round(scaled));
+    const text = scaled < 99.95 ? scaled.toFixed(1).replace(/\.0$/, "") : String(Math.round(scaled));
     return `${sign}${text}${suffix}`;
   }
   return `${sign}${Math.round(absolute)}`;

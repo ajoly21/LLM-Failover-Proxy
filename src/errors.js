@@ -1,20 +1,20 @@
-/** Attempt failure reasons — they drive both failover and cooldowns. */
+/** Attempt failure reasons, they drive both failover and cooldowns. */
 export const REASONS = {
-  NETWORK: 'network_error',
-  TIMEOUT: 'timeout',
-  RATE_LIMIT: 'rate_limited',
-  AUTH: 'auth_error',
-  UPSTREAM: 'upstream_error',
-  EMPTY: 'empty_response',
-  CONTENT_FILTER: 'content_filter',
-  MALFORMED: 'malformed_response',
-  SKIPPED: 'skipped',
+  NETWORK: "network_error",
+  TIMEOUT: "timeout",
+  RATE_LIMIT: "rate_limited",
+  AUTH: "auth_error",
+  UPSTREAM: "upstream_error",
+  EMPTY: "empty_response",
+  CONTENT_FILTER: "content_filter",
+  MALFORMED: "malformed_response",
+  SKIPPED: "skipped",
 };
 
 export class AttemptError extends Error {
   constructor(reason, message, { status = null, retryAfterMs = null } = {}) {
     super(message);
-    this.name = 'AttemptError';
+    this.name = "AttemptError";
     this.reason = reason;
     this.status = status;
     this.retryAfterMs = retryAfterMs;
@@ -23,13 +23,13 @@ export class AttemptError extends Error {
 
 export class ClientGoneError extends Error {
   constructor() {
-    super('client disconnected');
-    this.name = 'ClientGoneError';
+    super("client disconnected");
+    this.name = "ClientGoneError";
   }
 }
 
 /**
- * 429 / 5xx / network / timeout: fail over. Plain 4xx too — a provider may
+ * 429 / 5xx / network / timeout: fail over. Plain 4xx too, a provider may
  * reject a parameter that the next one accepts.
  */
 export function classifyStatus(status) {
@@ -48,6 +48,6 @@ export function parseRetryAfter(headerValue) {
 }
 
 /** OpenAI-shaped error envelope. */
-export function openAIError(message, { type = 'proxy_error', code = null, param = null, extra = null } = {}) {
+export function openAIError(message, { type = "proxy_error", code = null, param = null, extra = null } = {}) {
   return { error: { message, type, code, param, ...(extra ? { proxy: extra } : {}) } };
 }

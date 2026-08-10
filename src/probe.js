@@ -1,21 +1,21 @@
-import { resolveSecret } from './config.js';
-import { adapterFor } from './adapters/index.js';
-import { inspectCompletion } from './adapters/openai.js';
-import { createSseParser } from './sse.js';
-import { ms } from './logger.js';
+import { adapterFor } from "./adapters/index.js";
+import { inspectCompletion } from "./adapters/openai.js";
+import { resolveSecret } from "./config.js";
+import { ms } from "./logger.js";
+import { createSseParser } from "./sse.js";
 
 /** Long enough to produce several tokens, short enough to stay cheap. */
-const DEFAULT_PROMPT = 'In one short sentence, say what an HTTP proxy does.';
+const DEFAULT_PROMPT = "In one short sentence, say what an HTTP proxy does.";
 const DEFAULT_MAX_TOKENS = 64;
 const GENERATION_BUDGET_MS = 60000;
 
 function deadline(timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('timed out')), timeoutMs);
+  const timer = setTimeout(() => controller.abort(new Error("timed out")), timeoutMs);
   return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
-const reason = (err) => err?.timeoutReason || err?.cause?.code || err?.message || 'unknown error';
+const reason = (err) => err?.timeoutReason || err?.cause?.code || err?.message || "unknown error";
 
 function shortError(text) {
   try {
@@ -29,14 +29,14 @@ function shortError(text) {
 /** Checks that a provider is reachable, through its `/models` endpoint. */
 export async function probeProvider(provider, timeoutMs = 15000) {
   const adapter = adapterFor(provider);
-  const url = `${provider.baseUrl.replace(/\/+$/, '')}/models`;
+  const url = `${provider.baseUrl.replace(/\/+$/, "")}/models`;
   const { signal, clear } = deadline(timeoutMs);
   const startedAt = Date.now();
   try {
     const response = await fetch(url, { headers: adapter.headers(provider, resolveSecret(provider.apiKey)), signal });
     const text = await response.text();
     if (!response.ok) {
-      return { ok: false, latencyMs: Date.now() - startedAt, message: `HTTP ${response.status} — ${shortError(text)}` };
+      return { ok: false, latencyMs: Date.now() - startedAt, message: `HTTP ${response.status}, ${shortError(text)}` };
     }
     let ids = [];
     try {
@@ -74,12 +74,7 @@ export async function probeModel(config, entry, provider, options = {}) {
   return first;
 }
 
-async function streamProbe(
-  config,
-  entry,
-  provider,
-  { prompt = DEFAULT_PROMPT, maxTokens = DEFAULT_MAX_TOKENS, includeUsage = true } = {},
-) {
+async function streamProbe(config, entry, provider, { prompt = DEFAULT_PROMPT, maxTokens = DEFAULT_MAX_TOKENS, includeUsage = true } = {}) {
   const adapter = adapterFor(provider);
   const firstTokenMs = Math.max(3000, Number(config?.failover?.firstTokenTimeoutMs) || 15000);
 
@@ -89,7 +84,7 @@ async function streamProbe(
     clearTimeout(timer);
     timer = setTimeout(() => {
       const err = new Error(why);
-      err.name = 'TimeoutError';
+      err.name = "TimeoutError";
       err.timeoutReason = why;
       controller.abort(err);
     }, delay);
@@ -97,7 +92,7 @@ async function streamProbe(
 
   const body = {
     model: entry.model,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [{ role: "user", content: prompt }],
     max_tokens: maxTokens,
     stream: true,
   };
@@ -107,7 +102,7 @@ async function streamProbe(
   let ttftMs = null;
   let contentChunks = 0;
   let usage = null;
-  let text = '';
+  let text = "";
 
   const measure = () => {
     const totalMs = Date.now() - startedAt;
@@ -127,7 +122,7 @@ async function streamProbe(
   try {
     arm(firstTokenMs, `no token within ${ms(firstTokenMs)}`);
     const response = await fetch(adapter.chatEndpoint(provider), {
-      method: 'POST',
+      method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
       body: JSON.stringify(adapter.buildChatBody(body, entry)),
       signal: controller.signal,
@@ -138,22 +133,22 @@ async function streamProbe(
       return {
         ok: false,
         status: response.status,
-        message: `HTTP ${response.status} — ${shortError(raw)}`,
+        message: `HTTP ${response.status}, ${shortError(raw)}`,
         // A 4xx while sending the usage hint is likely about that extra field.
         retryWithoutUsage: includeUsage && response.status >= 400 && response.status < 500,
         ...measure(),
       };
     }
-    if (!response.body) return { ok: false, message: 'response has no body', ...measure() };
+    if (!response.body) return { ok: false, message: "response has no body", ...measure() };
 
     // Some providers ignore `stream: true` and answer with plain JSON.
-    if ((response.headers.get('content-type') || '').includes('application/json')) {
+    if ((response.headers.get("content-type") || "").includes("application/json")) {
       const normalized = adapter.normalizeChatResponse(await response.json());
       const verdict = inspectCompletion(normalized, config?.failover);
-      if (!verdict.ok) return { ok: false, message: `${verdict.reason} — ${verdict.message}`, ...measure() };
+      if (!verdict.ok) return { ok: false, message: `${verdict.reason}, ${verdict.message}`, ...measure() };
       ttftMs = Date.now() - startedAt; // no streaming: first token == whole answer
       usage = normalized.usage || null;
-      text = String(normalized.choices?.[0]?.message?.content || '');
+      text = String(normalized.choices?.[0]?.message?.content || "");
       return { ok: true, message: summarize(text), ...measure() };
     }
 
@@ -176,7 +171,7 @@ async function streamProbe(
           }
           contentChunks += 1;
           const delta = JSON.parse(frame.data).choices?.[0]?.delta;
-          if (typeof delta?.content === 'string') text += delta.content;
+          if (typeof delta?.content === "string") text += delta.content;
         }
         if (out.done) done = true;
       }
@@ -188,7 +183,7 @@ async function streamProbe(
       /* already closed */
     }
 
-    if (ttftMs == null) return { ok: false, message: 'empty answer (no usable token)', ...measure() };
+    if (ttftMs == null) return { ok: false, message: "empty answer (no usable token)", ...measure() };
     return { ok: true, message: summarize(text), ...measure() };
   } catch (err) {
     return { ok: false, message: reason(err), ...measure() };
@@ -198,7 +193,7 @@ async function streamProbe(
 }
 
 function summarize(text) {
-  const clean = String(text).replace(/\s+/g, ' ').trim();
-  if (!clean) return '(tool call or reasoning only)';
+  const clean = String(text).replace(/\s+/g, " ").trim();
+  if (!clean) return "(tool call or reasoning only)";
   return clean.length > 90 ? `${clean.slice(0, 89)}…` : clean;
 }

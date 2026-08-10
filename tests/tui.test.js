@@ -143,7 +143,9 @@ test('the wizard seeds the default chain and keeps the keys out of the config', 
     assert.match(app.frame(), /alpha\/alpha-large/, 'the chain is previewed in order');
 
     await app.press(KEY.enter); // use the default chain
-    assert.match(app.frame(), /API key 1\/2 . alpha/);
+    // \W+ rather than a literal separator: how the title punctuates itself is a
+    // style choice, the provider it is asking about is the point.
+    assert.match(app.frame(), /API key 1\/2\W+alpha/);
     assert.match(app.frame(), /ALPHA_API_KEY/);
     assert.match(app.frame(), /https:\/\/alpha\.test\/keys/);
 
@@ -151,7 +153,7 @@ test('the wizard seeds the default chain and keeps the keys out of the config', 
     assert.doesNotMatch(app.frame(), /sk-alpha-1/, 'the key is masked while typing');
 
     await app.press(KEY.enter); // → beta
-    assert.match(app.frame(), /API key 2\/2 . beta/);
+    assert.match(app.frame(), /API key 2\/2\W+beta/);
     await app.press(KEY.escape); // skip every remaining provider
     assert.match(app.frame(), /Ready/);
 

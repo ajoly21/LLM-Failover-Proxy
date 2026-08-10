@@ -1,26 +1,26 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { envPathFor, envValue, upsertEnv } from './env.js';
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { envPathFor, envValue, upsertEnv } from "./env.js";
 
 /** Uncommon port, away from the usual dev ranges (3000/5000/8000/8080/11434...). */
 export const DEFAULT_PORT = 47821;
 
-const APP_DIR = 'llm-failover-proxy';
+const APP_DIR = "llm-failover-proxy";
 
 /** Config files looked up in the current directory, in order, before the user config dir. */
-const LOCAL_FILENAMES = ['llm-proxy.config.json', 'config.json'];
+const LOCAL_FILENAMES = ["llm-proxy.config.json", "config.json"];
 
 export const DEFAULTS = {
   version: 1,
   server: {
-    host: '127.0.0.1',
+    host: "127.0.0.1",
     port: DEFAULT_PORT,
     // Key required from clients of the proxy (Authorization: Bearer ...). null = no auth.
     apiKey: null,
     cors: true,
-    logLevel: 'info', // debug | info | warn | error
+    logLevel: "info", // debug | info | warn | error
   },
   failover: {
     // Hard limit for a non-streamed request.
@@ -30,7 +30,7 @@ export const DEFAULTS = {
     // Hard limit between two chunks once the stream has started.
     idleTimeoutMs: 60000,
     // Ask the next model in the chain when the ones already in flight have not
-    // produced a usable answer within this delay — the earlier attempts keep
+    // produced a usable answer within this delay, the earlier attempts keep
     // running, and the first usable answer wins. 0 = strictly sequential.
     // Speculative attempts cost tokens on providers that answer too late.
     hedgeDelayMs: 5000,
@@ -59,9 +59,9 @@ export const DEFAULTS = {
 };
 
 function configHome() {
-  if (process.platform === 'win32' && process.env.APPDATA) return path.join(process.env.APPDATA, APP_DIR);
+  if (process.platform === "win32" && process.env.APPDATA) return path.join(process.env.APPDATA, APP_DIR);
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, APP_DIR);
-  return path.join(os.homedir(), '.config', APP_DIR);
+  return path.join(os.homedir(), ".config", APP_DIR);
 }
 
 /**
@@ -76,7 +76,7 @@ export function configPath() {
     const candidate = path.resolve(process.cwd(), name);
     if (fs.existsSync(candidate)) return candidate;
   }
-  return path.join(configHome(), 'config.json');
+  return path.join(configHome(), "config.json");
 }
 
 export function configExists(file = configPath()) {
@@ -91,12 +91,12 @@ export function isFirstRun(config) {
 /** Counters live next to their config: `config.json` → `config.stats.json`. */
 export function statsPathFor(configFile = configPath()) {
   const dir = path.dirname(configFile);
-  const base = path.basename(configFile).replace(/\.json$/i, '');
+  const base = path.basename(configFile).replace(/\.json$/i, "");
   return path.join(dir, `${base}.stats.json`);
 }
 
 function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Fills in missing keys from `defaults`, recursively, without touching present ones. */
@@ -108,14 +108,14 @@ function withDefaults(value, defaults) {
 }
 
 export function newId(prefix) {
-  return `${prefix}_${crypto.randomBytes(4).toString('hex')}`;
+  return `${prefix}_${crypto.randomBytes(4).toString("hex")}`;
 }
 
 export function loadConfig(file = configPath()) {
   let raw = {};
   if (fs.existsSync(file)) {
     try {
-      raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      raw = JSON.parse(fs.readFileSync(file, "utf8"));
     } catch (err) {
       throw new Error(`Cannot read config (${file}): ${err.message}`);
     }
@@ -146,10 +146,10 @@ export function saveConfig(config, file = config.__file || configPath()) {
 
 function normalizeProvider(provider) {
   return {
-    id: provider.id || newId('prov'),
-    name: String(provider.name || 'provider').trim(),
-    type: provider.type === 'anthropic' ? 'anthropic' : 'openai',
-    baseUrl: String(provider.baseUrl || '').replace(/\/+$/, ''),
+    id: provider.id || newId("prov"),
+    name: String(provider.name || "provider").trim(),
+    type: provider.type === "anthropic" ? "anthropic" : "openai",
+    baseUrl: String(provider.baseUrl || "").replace(/\/+$/, ""),
     apiKey: provider.apiKey ?? null,
     headers: isPlainObject(provider.headers) ? provider.headers : {},
     enabled: provider.enabled !== false,
@@ -158,11 +158,11 @@ function normalizeProvider(provider) {
 
 function normalizeModel(model) {
   return {
-    id: model.id || newId('mdl'),
+    id: model.id || newId("mdl"),
     providerId: model.providerId,
-    model: String(model.model || '').trim(),
-    alias: (model.alias || model.model || '').trim(),
-    kind: model.kind === 'embedding' ? 'embedding' : 'chat',
+    model: String(model.model || "").trim(),
+    alias: (model.alias || model.model || "").trim(),
+    kind: model.kind === "embedding" ? "embedding" : "chat",
     enabled: model.enabled !== false,
     params: isPlainObject(model.params) ? model.params : {},
   };
@@ -170,18 +170,18 @@ function normalizeModel(model) {
 
 /** An `env:NAME` value is read from the environment at call time, never stored. */
 export function resolveSecret(value) {
-  if (typeof value !== 'string') return value ?? null;
-  if (value.startsWith('env:')) return envValue(value.slice(4));
+  if (typeof value !== "string") return value ?? null;
+  if (value.startsWith("env:")) return envValue(value.slice(4));
   return value;
 }
 
 /** Variable a provider's key is stored under: `azure-openai` → `AZURE_OPENAI_API_KEY`. */
 export function envVarName(providerName) {
-  const slug = String(providerName || '')
+  const slug = String(providerName || "")
     .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return `${slug || 'PROVIDER'}_API_KEY`;
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${slug || "PROVIDER"}_API_KEY`;
 }
 
 /**
@@ -190,31 +190,29 @@ export function envVarName(providerName) {
  * to the `.env` where it belongs.
  */
 export function describeKey(apiKey) {
-  if (!apiKey) return { state: 'none', text: 'none' };
-  if (typeof apiKey === 'string' && apiKey.startsWith('env:')) {
+  if (!apiKey) return { state: "none", text: "none" };
+  if (typeof apiKey === "string" && apiKey.startsWith("env:")) {
     const name = apiKey.slice(4);
-    return envValue(name)
-      ? { state: 'env', text: `env:${name}`, envVar: name }
-      : { state: 'missing', text: `env:${name} missing`, envVar: name };
+    return envValue(name) ? { state: "env", text: `env:${name}`, envVar: name } : { state: "missing", text: `env:${name} missing`, envVar: name };
   }
-  return { state: 'inline', text: maskSecret(apiKey) };
+  return { state: "inline", text: maskSecret(apiKey) };
 }
 
 export function maskSecret(value) {
-  if (!value) return '(none)';
-  if (typeof value === 'string' && value.startsWith('env:')) {
-    return `${value} → ${process.env[value.slice(4)] ? 'set' : 'MISSING'}`;
+  if (!value) return "(none)";
+  if (typeof value === "string" && value.startsWith("env:")) {
+    return `${value} → ${process.env[value.slice(4)] ? "set" : "MISSING"}`;
   }
   const text = String(value);
-  if (text.length <= 8) return '*'.repeat(text.length);
-  return `${text.slice(0, 4)}${'*'.repeat(Math.min(12, text.length - 8))}${text.slice(-4)}`;
+  if (text.length <= 8) return "*".repeat(text.length);
+  return `${text.slice(0, 4)}${"*".repeat(Math.min(12, text.length - 8))}${text.slice(-4)}`;
 }
 
 /** Keys still sitting in the config file, which should be in the `.env` instead. */
 export function inlineKeys(config) {
-  const isInline = (value) => Boolean(value) && !(typeof value === 'string' && value.startsWith('env:'));
+  const isInline = (value) => Boolean(value) && !(typeof value === "string" && value.startsWith("env:"));
   const found = config.providers.filter((provider) => isInline(provider.apiKey)).map((provider) => provider.name);
-  if (isInline(config.server.apiKey)) found.push('the proxy itself');
+  if (isInline(config.server.apiKey)) found.push("the proxy itself");
   return found;
 }
 
@@ -229,7 +227,7 @@ export function migrateKeys(config, file = config.__file || configPath()) {
 
   for (const provider of config.providers) {
     const key = provider.apiKey;
-    if (!key || (typeof key === 'string' && key.startsWith('env:'))) continue;
+    if (!key || (typeof key === "string" && key.startsWith("env:"))) continue;
     const variable = envVarName(provider.name);
     upsertEnv(envFile, { [variable]: key });
     provider.apiKey = `env:${variable}`;
@@ -237,10 +235,10 @@ export function migrateKeys(config, file = config.__file || configPath()) {
   }
 
   const serverKey = config.server.apiKey;
-  if (serverKey && !(typeof serverKey === 'string' && serverKey.startsWith('env:'))) {
+  if (serverKey && !(typeof serverKey === "string" && serverKey.startsWith("env:"))) {
     upsertEnv(envFile, { LLM_PROXY_API_KEY: serverKey });
-    config.server.apiKey = 'env:LLM_PROXY_API_KEY';
-    moved.push({ target: 'the proxy itself', envVar: 'LLM_PROXY_API_KEY' });
+    config.server.apiKey = "env:LLM_PROXY_API_KEY";
+    moved.push({ target: "the proxy itself", envVar: "LLM_PROXY_API_KEY" });
   }
 
   if (moved.length) saveConfig(config, file);
@@ -252,7 +250,7 @@ export function getProvider(config, providerId) {
 }
 
 export function providerLabel(config, providerId) {
-  return getProvider(config, providerId)?.name ?? '(deleted provider)';
+  return getProvider(config, providerId)?.name ?? "(deleted provider)";
 }
 
 /** The order of `config.models` IS the priority order (index 0 = priority 1). */

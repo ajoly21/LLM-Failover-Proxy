@@ -1,7 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { REASONS } from './errors.js';
-import { log } from './logger.js';
+import fs from "node:fs";
+import path from "node:path";
+import { REASONS } from "./errors.js";
+import { log } from "./logger.js";
 
 /** Per-model-entry runtime state: counters plus circuit breaker. */
 const runtime = new Map();
@@ -84,7 +84,7 @@ export function recordFailure(id, { reason, message, retryAfterMs = null, cooldo
   const state = stateFor(id);
   state.failures += 1;
   state.consecutiveFailures += 1;
-  state.lastError = { reason, message: String(message || '').slice(0, 400), at: Date.now() };
+  state.lastError = { reason, message: String(message || "").slice(0, 400), at: Date.now() };
 
   const { failuresBeforeTrip = 2, baseMs = 15000, maxMs = 300000 } = cooldown || {};
   let pause = 0;
@@ -144,7 +144,7 @@ export function enableStatsPersistence(file, { knownIds = null } = {}) {
   if (!exitHookInstalled) {
     exitHookInstalled = true;
     // `exit` covers SIGINT/SIGTERM (both end in process.exit) and normal exits.
-    process.on('exit', () => flushStats());
+    process.on("exit", () => flushStats());
   }
 }
 
@@ -153,12 +153,12 @@ function restoreFrom(file, knownIds) {
 
   let raw;
   try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (err) {
     log.warn(`ignoring unreadable stats file (${file}): ${err.message}`);
     return;
   }
-  if (!raw || typeof raw !== 'object' || !raw.entries || typeof raw.entries !== 'object') return;
+  if (!raw || typeof raw !== "object" || !raw.entries || typeof raw.entries !== "object") return;
   if (Number.isFinite(raw.since)) since = raw.since;
 
   let restored = 0;
@@ -171,7 +171,7 @@ function restoreFrom(file, knownIds) {
     runtime.set(id, sanitize(saved));
     restored += 1;
   }
-  log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ''}`);
+  log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ""}`);
 }
 
 /** A stats file is user-editable and may be stale: never trust its shape. */
@@ -182,7 +182,7 @@ function sanitize(saved) {
 
   state.consecutiveFailures = Math.max(0, num(saved?.consecutiveFailures));
   state.cooldownUntil = Math.max(0, num(saved?.cooldownUntil));
-  state.cooldownReason = typeof saved?.cooldownReason === 'string' ? saved.cooldownReason : null;
+  state.cooldownReason = typeof saved?.cooldownReason === "string" ? saved.cooldownReason : null;
   state.requests = Math.max(0, num(saved?.requests));
   state.successes = Math.max(0, num(saved?.successes));
   state.failures = Math.max(0, num(saved?.failures));
@@ -192,10 +192,10 @@ function sanitize(saved) {
   state.lastUsedAt = nullableNum(saved?.lastUsedAt);
 
   const lastError = saved?.lastError;
-  if (lastError && typeof lastError === 'object' && typeof lastError.reason === 'string') {
+  if (lastError && typeof lastError === "object" && typeof lastError.reason === "string") {
     state.lastError = {
       reason: lastError.reason,
-      message: String(lastError.message || '').slice(0, 400),
+      message: String(lastError.message || "").slice(0, 400),
       at: num(lastError.at, Date.now()),
     };
   }
@@ -204,7 +204,7 @@ function sanitize(saved) {
 
 /**
  * Writes the current state now. Synchronous on purpose: it must also work from
- * an `exit` handler, and it runs once per finished attempt — an LLM call lasts
+ * an `exit` handler, and it runs once per finished attempt, an LLM call lasts
  * orders of magnitude longer than writing this file. Deferring it behind a
  * timer instead would lose whatever a hard kill interrupts (and a hard kill is
  * exactly what cannot be caught on Windows).

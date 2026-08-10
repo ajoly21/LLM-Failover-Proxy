@@ -3,18 +3,18 @@
  *
  * Secrets never live in the configuration JSON: a provider stores the *name* of
  * the variable holding its key (`env:GROQ_API_KEY`), and the value comes from
- * the environment — either the real one, or a `.env` file loaded here. That way
+ * the environment, either the real one, or a `.env` file loaded here. That way
  * the config can be committed, shared or pasted into an issue as is.
  */
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
 const HEADER = [
-  '# llm-failover-proxy — provider API keys.',
-  '# This file holds secrets: keep it out of version control.',
-  '# Copy .env.example to get the list of variables the default chain expects.',
-  '',
-].join('\n');
+  "# llm-failover-proxy, provider API keys.",
+  "# This file holds secrets: keep it out of version control.",
+  "# Copy .env.example to get the list of variables the default chain expects.",
+  "",
+].join("\n");
 
 /** `KEY=value`, tolerating `export ` and surrounding spaces. */
 const KEY_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
@@ -28,15 +28,15 @@ function unquote(raw) {
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
     return value
       .slice(1, -1)
-      .replace(/\\n/g, '\n')
-      .replace(/\\r/g, '\r')
-      .replace(/\\t/g, '\t')
-      .replace(/\\(["'\\])/g, '$1');
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t")
+      .replace(/\\(["'\\])/g, "$1");
   }
   if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
   // Unquoted: ` #` starts a trailing comment. A bare `#` inside a token (as in
   // some API keys) is kept.
-  const comment = value.indexOf(' #');
+  const comment = value.indexOf(" #");
   return (comment === -1 ? value : value.slice(0, comment)).trim();
 }
 
@@ -44,7 +44,7 @@ function unquote(raw) {
 export function parseEnv(text) {
   const values = {};
   for (const line of String(text).split(/\r?\n/)) {
-    if (!line.trim() || line.trim().startsWith('#')) continue;
+    if (!line.trim() || line.trim().startsWith("#")) continue;
     const match = KEY_LINE.exec(line);
     if (match) values[match[1]] = unquote(match[2]);
   }
@@ -53,14 +53,14 @@ export function parseEnv(text) {
 
 /** Quotes only when the value would otherwise be re-read differently. */
 export function formatEnvValue(value) {
-  const text = String(value ?? '');
-  if (text === '') return '';
+  const text = String(value ?? "");
+  if (text === "") return "";
   return /^[A-Za-z0-9_@:%+=./~,-]+$/.test(text) ? text : JSON.stringify(text);
 }
 
 /** The `.env` that belongs to a config file: same directory. */
 export function envPathFor(configFile) {
-  return path.join(path.dirname(path.resolve(configFile)), '.env');
+  return path.join(path.dirname(path.resolve(configFile)), ".env");
 }
 
 /**
@@ -70,14 +70,14 @@ export function envPathFor(configFile) {
 export function envFileCandidates(configFile, cwd = process.cwd()) {
   const files = [];
   if (process.env.LLM_PROXY_ENV) files.push(path.resolve(process.env.LLM_PROXY_ENV));
-  files.push(path.resolve(cwd, '.env'));
+  files.push(path.resolve(cwd, ".env"));
   if (configFile) files.push(envPathFor(configFile));
   return [...new Set(files)];
 }
 
 export function readEnvFile(file) {
   try {
-    return parseEnv(fs.readFileSync(file, 'utf8'));
+    return parseEnv(fs.readFileSync(file, "utf8"));
   } catch {
     return null; // missing or unreadable: not an error, just no keys here
   }
@@ -85,7 +85,7 @@ export function readEnvFile(file) {
 
 /**
  * Exports values to `process.env`. A variable already set in the real
- * environment wins — except when this module is the one that set it, so a
+ * environment wins, except when this module is the one that set it, so a
  * reload after an edit is picked up.
  */
 export function applyEnvValues(values) {
@@ -119,17 +119,17 @@ export function envValue(name) {
 }
 
 /**
- * Writes keys into a `.env`, keeping the rest of the file — comments and
+ * Writes keys into a `.env`, keeping the rest of the file, comments and
  * unrelated variables included. Empty values are ignored rather than stored,
  * so skipping a provider during setup leaves no trace.
  */
 export function upsertEnv(file, values, { apply = true } = {}) {
-  const entries = Object.entries(values).filter(([, value]) => value != null && String(value) !== '');
+  const entries = Object.entries(values).filter(([, value]) => value != null && String(value) !== "");
   if (!entries.length) return { file, written: [] };
 
   let text;
   try {
-    text = fs.readFileSync(file, 'utf8');
+    text = fs.readFileSync(file, "utf8");
   } catch {
     text = HEADER;
   }
@@ -140,7 +140,7 @@ export function upsertEnv(file, values, { apply = true } = {}) {
     const line = `${name}=${formatEnvValue(value)}`;
     const index = lines.findIndex((candidate) => KEY_LINE.exec(candidate)?.[1] === name);
     if (index === -1) {
-      if (lines.at(-1)?.trim()) lines.push('');
+      if (lines.at(-1)?.trim()) lines.push("");
       lines.push(line);
     } else {
       lines[index] = line;
@@ -150,7 +150,7 @@ export function upsertEnv(file, values, { apply = true } = {}) {
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${lines.join('\n').trimEnd()}\n`, { mode: 0o600 });
+  fs.writeFileSync(tmp, `${lines.join("\n").trimEnd()}\n`, { mode: 0o600 });
   fs.renameSync(tmp, file);
   try {
     fs.chmodSync(file, 0o600); // no-op on Windows, meaningful elsewhere

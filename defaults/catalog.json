@@ -2,7 +2,7 @@
   "about": [
     "Default provider and model catalogue shipped with llm-failover-proxy.",
     "Models are listed in failover priority order: the first one is tried first.",
-    "No secret here — each provider names the environment variable holding its",
+    "No secret here, each provider names the environment variable holding its",
     "key, which the proxy reads from the real environment or from a .env file.",
     "Edit this file to change what a fresh install starts with, then run",
     "`pnpm run env:example` to refresh .env.example."

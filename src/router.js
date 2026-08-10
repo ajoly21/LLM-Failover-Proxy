@@ -1,18 +1,21 @@
-import { getProvider, resolveSecret } from './config.js';
-import { adapterFor } from './adapters/index.js';
-import { inspectCompletion, inspectEmbedding } from './adapters/openai.js';
-import { AttemptError, ClientGoneError, REASONS, classifyStatus, parseRetryAfter } from './errors.js';
-import { createSseParser, SSE_DONE } from './sse.js';
-import { cooldownRemaining, isCoolingDown, recordCancelled, recordFailure, recordStart, recordSuccess } from './state.js';
-import { c, compact, log, ms } from './logger.js';
+import { adapterFor } from "./adapters/index.js";
+import { inspectCompletion, inspectEmbedding } from "./adapters/openai.js";
+import { getProvider, resolveSecret } from "./config.js";
+import { AttemptError, classifyStatus, ClientGoneError, parseRetryAfter, REASONS } from "./errors.js";
+import { c, compact, log, ms } from "./logger.js";
+import { createSseParser, SSE_DONE } from "./sse.js";
+import { cooldownRemaining, isCoolingDown, recordCancelled, recordFailure, recordStart, recordSuccess } from "./state.js";
 
-const norm = (value) => String(value || '').trim().toLowerCase();
+const norm = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
 
-/** Abort reason for an attempt that lost the race — not a provider failure. */
+/** Abort reason for an attempt that lost the race, not a provider failure. */
 class RaceLost extends Error {
   constructor() {
-    super('another provider answered first');
-    this.name = 'RaceLost';
+    super("another provider answered first");
+    this.name = "RaceLost";
   }
 }
 
@@ -32,12 +35,12 @@ function usableEntries(config, kind) {
  * Builds the ordered attempt list for a requested `model`.
  * The order of `config.models` IS the priority order.
  */
-export function resolveChain(config, requestedModel, kind = 'chat') {
+export function resolveChain(config, requestedModel, kind = "chat") {
   const pool = usableEntries(config, kind);
-  const requested = String(requestedModel || '').trim();
-  const isAuto = !requested || ['auto', 'default', 'proxy'].includes(norm(requested));
+  const requested = String(requestedModel || "").trim();
+  const isAuto = !requested || ["auto", "default", "proxy"].includes(norm(requested));
 
-  if (isAuto) return { entries: pool, matched: 'auto', notFound: false };
+  if (isAuto) return { entries: pool, matched: "auto", notFound: false };
 
   const byAlias = pool.filter((entry) => norm(entry.alias) === norm(requested));
   const byModel = pool.filter((entry) => norm(entry.model) === norm(requested));
@@ -74,17 +77,17 @@ function orderByAvailability(entries) {
  */
 export function listModels(config) {
   const seen = new Map(); // normalized key -> exposed entry (case-insensitive dedupe)
-  for (const entry of usableEntries(config, 'chat').concat(usableEntries(config, 'embedding'))) {
-    const id = (entry.alias || entry.model || '').trim();
+  for (const entry of usableEntries(config, "chat").concat(usableEntries(config, "embedding"))) {
+    const id = (entry.alias || entry.model || "").trim();
     if (!id || seen.has(norm(id))) continue;
     seen.set(norm(id), {
       id,
-      object: 'model',
+      object: "model",
       created: 0,
-      owned_by: getProvider(config, entry.providerId)?.name || 'llm-proxy',
+      owned_by: getProvider(config, entry.providerId)?.name || "llm-proxy",
     });
   }
-  return [{ id: 'auto', object: 'model', created: 0, owned_by: 'llm-proxy' }, ...seen.values()];
+  return [{ id: "auto", object: "model", created: 0, owned_by: "llm-proxy" }, ...seen.values()];
 }
 
 /* ------------------------------------------------------------------ *
@@ -92,16 +95,16 @@ export function listModels(config) {
  * ------------------------------------------------------------------ */
 
 function label(config, entry) {
-  return `${getProvider(config, entry.providerId)?.name || '?'}/${entry.model}`;
+  return `${getProvider(config, entry.providerId)?.name || "?"}/${entry.model}`;
 }
 
 function toAttemptError(err) {
   if (err instanceof AttemptError) return err;
-  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-    return new AttemptError(REASONS.TIMEOUT, err.timeoutReason || 'deadline exceeded');
+  if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+    return new AttemptError(REASONS.TIMEOUT, err.timeoutReason || "deadline exceeded");
   }
   const code = err?.cause?.code || err?.code;
-  return new AttemptError(REASONS.NETWORK, code ? `${code}: ${err.message}` : err?.message || 'network failure');
+  return new AttemptError(REASONS.NETWORK, code ? `${code}: ${err.message}` : err?.message || "network failure");
 }
 
 function tokensOf(usage) {
@@ -109,11 +112,11 @@ function tokensOf(usage) {
 }
 
 async function upstreamFailure(response) {
-  let text = '';
+  let text = "";
   try {
     text = (await response.text()).slice(0, 800);
   } catch {
-    text = '(unreadable body)';
+    text = "(unreadable body)";
   }
   let message = text;
   try {
@@ -122,9 +125,9 @@ async function upstreamFailure(response) {
   } catch {
     /* plain text */
   }
-  return new AttemptError(classifyStatus(response.status), `HTTP ${response.status} — ${message}`, {
+  return new AttemptError(classifyStatus(response.status), `HTTP ${response.status}, ${message}`, {
     status: response.status,
-    retryAfterMs: parseRetryAfter(response.headers.get('retry-after')),
+    retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
   });
 }
 
@@ -138,7 +141,7 @@ function createWatchdog(controller) {
         const err = new Error(why);
         // `fetch` rejects with the abort reason as-is, so tag it: without this a
         // deadline would be reported as a plain network error.
-        err.name = 'TimeoutError';
+        err.name = "TimeoutError";
         err.timeoutReason = why;
         controller.abort(err);
       }, delay);
@@ -155,10 +158,10 @@ async function attemptJson({ config, entry, provider, adapter, body, kind, contr
   watchdog.arm(config.failover.requestTimeoutMs, `no response within ${ms(config.failover.requestTimeoutMs)}`);
 
   try {
-    const url = kind === 'embedding' ? adapter.embeddingEndpoint(provider) : adapter.chatEndpoint(provider);
-    const payload = kind === 'embedding' ? adapter.buildEmbeddingBody(body, entry) : adapter.buildChatBody(body, entry);
+    const url = kind === "embedding" ? adapter.embeddingEndpoint(provider) : adapter.chatEndpoint(provider);
+    const payload = kind === "embedding" ? adapter.buildEmbeddingBody(body, entry) : adapter.buildChatBody(body, entry);
     const response = await fetch(url, {
-      method: 'POST',
+      method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
       body: JSON.stringify(payload),
       signal: controller.signal,
@@ -172,13 +175,13 @@ async function attemptJson({ config, entry, provider, adapter, body, kind, contr
       throw new AttemptError(REASONS.MALFORMED, `invalid JSON response: ${err.message}`);
     }
 
-    const normalized = kind === 'embedding' ? adapter.normalizeEmbeddingResponse(json) : adapter.normalizeChatResponse(json);
-    const verdict = kind === 'embedding' ? inspectEmbedding(normalized) : inspectCompletion(normalized, config.failover);
+    const normalized = kind === "embedding" ? adapter.normalizeEmbeddingResponse(json) : adapter.normalizeChatResponse(json);
+    const verdict = kind === "embedding" ? inspectEmbedding(normalized) : inspectCompletion(normalized, config.failover);
     if (!verdict.ok) throw new AttemptError(verdict.reason, verdict.message);
 
     // Only now is this answer worth delivering, so only now do we race for it.
-    if (!claim()) return { kind: 'cancelled' };
-    return { kind: 'win', json: normalized, usage: normalized.usage };
+    if (!claim()) return { kind: "cancelled" };
+    return { kind: "win", json: normalized, usage: normalized.usage };
   } finally {
     watchdog.clear();
   }
@@ -227,16 +230,16 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
 
   try {
     const response = await fetch(adapter.chatEndpoint(provider), {
-      method: 'POST',
+      method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
       body: JSON.stringify({ ...adapter.buildChatBody(body, entry), stream: true }),
       signal: controller.signal,
     });
     if (!response.ok) throw await upstreamFailure(response);
-    if (!response.body) throw new AttemptError(REASONS.MALFORMED, 'response has no body');
+    if (!response.body) throw new AttemptError(REASONS.MALFORMED, "response has no body");
 
     // Some providers answer with plain JSON despite `stream: true`: convert it.
-    if ((response.headers.get('content-type') || '').includes('application/json')) {
+    if ((response.headers.get("content-type") || "").includes("application/json")) {
       const normalized = adapter.normalizeChatResponse(await response.json());
       const verdict = inspectCompletion(normalized, config.failover);
       if (!verdict.ok) throw new AttemptError(verdict.reason, verdict.message);
@@ -273,14 +276,14 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
     }
 
     if (!committed) {
-      throw new AttemptError(REASONS.EMPTY, done ? 'stream ended without usable content' : 'stream closed early');
+      throw new AttemptError(REASONS.EMPTY, done ? "stream ended without usable content" : "stream closed early");
     }
     sink.write(SSE_DONE);
     sink.end();
-    return { kind: 'win', usage: lastUsage };
+    return { kind: "win", usage: lastUsage };
   } catch (err) {
-    if (err?.name === 'ClientGoneError') throw err; // client cancelled: not the provider's fault
-    if (err?.name === 'RaceLost' || controller.signal.reason?.name === 'RaceLost') return { kind: 'cancelled' };
+    if (err?.name === "ClientGoneError") throw err; // client cancelled: not the provider's fault
+    if (err?.name === "RaceLost" || controller.signal.reason?.name === "RaceLost") return { kind: "cancelled" };
 
     if (committed) {
       // The client already holds part of the answer: replaying elsewhere would
@@ -291,13 +294,13 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
           error: {
             message: `stream interrupted by ${provider?.name}/${entry.model}: ${info.message}`,
             type: info.reason,
-            code: 'stream_interrupted',
+            code: "stream_interrupted",
           },
         })}\n\n`,
       );
       sink.write(SSE_DONE);
       sink.end();
-      return { kind: 'win', usage: lastUsage, degraded: true, error: info };
+      return { kind: "win", usage: lastUsage, degraded: true, error: info };
     }
     throw err;
   } finally {
@@ -309,7 +312,7 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
 function framesFromCompletion(json) {
   const choice = json.choices?.[0] || {};
   const message = choice.message || {};
-  const base = { id: json.id, object: 'chat.completion.chunk', created: json.created, model: json.model };
+  const base = { id: json.id, object: "chat.completion.chunk", created: json.created, model: json.model };
   const frame = (delta, finish, hasContent, usage) => ({
     data: JSON.stringify({
       ...base,
@@ -320,12 +323,12 @@ function framesFromCompletion(json) {
     usage: usage || null,
   });
 
-  const frames = [frame({ role: 'assistant', content: '' }, null, false)];
+  const frames = [frame({ role: "assistant", content: "" }, null, false)];
   if (message.content) frames.push(frame({ content: message.content }, null, true));
   if (message.tool_calls?.length) {
     frames.push(frame({ tool_calls: message.tool_calls.map((call, index) => ({ index, ...call })) }, null, true));
   }
-  frames.push(frame({}, choice.finish_reason ?? 'stop', false, json.usage || null));
+  frames.push(frame({}, choice.finish_reason ?? "stop", false, json.usage || null));
   return frames;
 }
 
@@ -335,14 +338,14 @@ function framesFromCompletion(json) {
 
 /** Human-readable account of why nothing could answer, one line per attempt. */
 export function failureMessage(result) {
-  const lines = [`⚠️  llm-failover-proxy: no provider could answer this request.`, ''];
+  const lines = [`⚠️  llm-failover-proxy: no provider could answer this request.`, ""];
   result.attempts.forEach((attempt, index) => {
-    lines.push(`  ${index + 1}. ${attempt.provider}/${attempt.model} — ${attempt.reason}: ${attempt.message}`);
+    lines.push(`  ${index + 1}. ${attempt.provider}/${attempt.model}, ${attempt.reason}: ${attempt.message}`);
   });
-  if (!result.attempts.length) lines.push('  (no provider was even eligible — check the chain configuration)');
-  lines.push('');
+  if (!result.attempts.length) lines.push("  (no provider was even eligible, check the chain configuration)");
+  lines.push("");
   lines.push(`Run \`llm-failover-proxy status\` or read the proxy logs for the full picture.`);
-  return lines.join('\n');
+  return lines.join("\n");
 }
 
 /**
@@ -358,9 +361,9 @@ export function failureFrames(result, requestedModel) {
   const message = failureMessage(result);
   const base = {
     id: `chatcmpl-proxy-${Date.now().toString(36)}`,
-    object: 'chat.completion.chunk',
+    object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
-    model: requestedModel || 'llm-failover-proxy',
+    model: requestedModel || "llm-failover-proxy",
   };
   const chunk = (delta, finish = null, extra = null) => ({
     ...base,
@@ -368,15 +371,15 @@ export function failureFrames(result, requestedModel) {
     ...(extra || {}),
   });
 
-  const frames = [chunk({ role: 'assistant', content: '' })];
+  const frames = [chunk({ role: "assistant", content: "" })];
   // Line by line, so a chat UI renders it progressively like any other answer.
-  for (const line of message.split('\n')) frames.push(chunk({ content: `${line}\n` }));
+  for (const line of message.split("\n")) frames.push(chunk({ content: `${line}\n` }));
   frames.push(
-    chunk({}, 'stop', {
+    chunk({}, "stop", {
       error: {
         message: result.message,
         type: result.errorType,
-        code: 'all_providers_failed',
+        code: "all_providers_failed",
         proxy: { attempts: result.attempts },
       },
     }),
@@ -390,13 +393,13 @@ export function failureFrames(result, requestedModel) {
 
 /** Races the given promises against a delay. `null` delay = no timer. */
 async function raceWithTimer(promises, delayMs) {
-  if (delayMs == null) return { type: 'settled', value: await Promise.race(promises) };
+  if (delayMs == null) return { type: "settled", value: await Promise.race(promises) };
   let timer = null;
   const hedge = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ type: 'hedge' }), delayMs);
+    timer = setTimeout(() => resolve({ type: "hedge" }), delayMs);
   });
   try {
-    return await Promise.race([...promises.map((promise) => promise.then((value) => ({ type: 'settled', value }))), hedge]);
+    return await Promise.race([...promises.map((promise) => promise.then((value) => ({ type: "settled", value }))), hedge]);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -407,7 +410,7 @@ async function raceWithTimer(promises, delayMs) {
  *
  * Attempts are **staggered, not serialised**: the highest-priority model is
  * asked first, and if it has not produced a usable answer within
- * `hedgeDelayMs`, the next one is asked too — while the first keeps going.
+ * `hedgeDelayMs`, the next one is asked too, while the first keeps going.
  * The first usable answer wins, every other in-flight attempt is aborted, and
  * only the winner ever reaches the client. That keeps the configured order
  * meaningful without letting one slow provider dictate the response time.
@@ -417,24 +420,24 @@ async function raceWithTimer(promises, delayMs) {
  *
  * @returns {Promise<{type: 'json'|'stream'|'error'} & Record<string, any>>}
  */
-export async function run({ config, body, kind = 'chat', sink = null, clientGone, requestId = '-' }) {
+export async function run({ config, body, kind = "chat", sink = null, clientGone, requestId = "-" }) {
   const { entries, matched, notFound } = resolveChain(config, body.model, kind);
 
   if (notFound) {
     return {
-      type: 'error',
+      type: "error",
       status: 404,
       message: `Unknown model "${body.model}". See GET /v1/models.`,
-      errorType: 'invalid_request_error',
+      errorType: "invalid_request_error",
       attempts: [],
     };
   }
   if (!entries.length) {
     return {
-      type: 'error',
+      type: "error",
       status: 503,
       message: `No ${kind} model configured or enabled. Run the CLI to add one (\`npx llm-failover-proxy\`).`,
-      errorType: 'no_backend',
+      errorType: "no_backend",
       attempts: [],
     };
   }
@@ -483,7 +486,7 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
       const provider = getProvider(config, entry.providerId);
       const adapter = adapterFor(provider);
 
-      if (kind === 'embedding' && !adapter.supportsEmbeddings) {
+      if (kind === "embedding" && !adapter.supportsEmbeddings) {
         attempts.push({
           provider: provider?.name,
           model: entry.model,
@@ -504,7 +507,7 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
       }
 
       const cooling = cooldownRemaining(entry.id);
-      if (cooling > 0) log.debug(`[${requestId}] ${label(config, entry)} is benched (${ms(cooling)}) — tried as a last resort`);
+      if (cooling > 0) log.debug(`[${requestId}] ${label(config, entry)} is benched (${ms(cooling)}), tried as a last resort`);
 
       const controller = new AbortController();
       const startedAt = Date.now();
@@ -523,14 +526,12 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
       const settle = (async () => {
         try {
           const shared = { config, entry, provider, adapter, body, controller, claim: claimFor(position) };
-          return streaming
-            ? await attemptStream({ ...shared, sink, meta })
-            : await attemptJson({ ...shared, kind });
+          return streaming ? await attemptStream({ ...shared, sink, meta }) : await attemptJson({ ...shared, kind });
         } catch (err) {
-          if (err?.name === 'ClientGoneError') return { kind: 'gone' };
-          if (err?.name === 'RaceLost' || controller.signal.reason?.name === 'RaceLost') return { kind: 'cancelled' };
-          if (controller.signal.reason?.name === 'ClientGoneError') return { kind: 'gone' };
-          return { kind: 'fail', error: toAttemptError(err) };
+          if (err?.name === "ClientGoneError") return { kind: "gone" };
+          if (err?.name === "RaceLost" || controller.signal.reason?.name === "RaceLost") return { kind: "cancelled" };
+          if (controller.signal.reason?.name === "ClientGoneError") return { kind: "gone" };
+          return { kind: "fail", error: toAttemptError(err) };
         }
       })();
 
@@ -550,26 +551,26 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
   try {
     if (!launch() && !inFlight.size) {
       return {
-        type: 'error',
+        type: "error",
         status: 502,
         message: `No provider could be tried (${attempts.length} skipped) for "${matched}".`,
-        errorType: 'all_providers_failed',
+        errorType: "all_providers_failed",
         attempts,
       };
     }
 
     while (inFlight.size > 0) {
       const canHedge = hedgeDelayMs > 0 && claimed === null && launched < limit && inFlight.size < maxInFlight;
-      const raced = await raceWithTimer([...inFlight.values()].map((task) => task.promise), canHedge ? hedgeDelayMs : null);
+      const raced = await raceWithTimer(
+        [...inFlight.values()].map((task) => task.promise),
+        canHedge ? hedgeDelayMs : null,
+      );
 
-      if (raced.type === 'hedge') {
-        const waiting = [...inFlight.values()].map((task) => label(config, task.entry)).join(', ');
+      if (raced.type === "hedge") {
+        const waiting = [...inFlight.values()].map((task) => label(config, task.entry)).join(", ");
         if (launch()) {
           const started = order[launched - 1];
-          log.info(
-            `[${requestId}] ${c.cyan('hedge')} → ${label(config, started)} ` +
-              c.gray(`(nothing usable from ${waiting} in ${ms(hedgeDelayMs)})`),
-          );
+          log.info(`[${requestId}] ${c.cyan("hedge")} → ${label(config, started)} ` + c.gray(`(nothing usable from ${waiting} in ${ms(hedgeDelayMs)})`));
         }
         continue;
       }
@@ -580,15 +581,15 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
       const target = label(config, task.entry);
       const place = `${position + 1}/${limit}`;
 
-      if (outcome.kind === 'gone') throw new ClientGoneError();
+      if (outcome.kind === "gone") throw new ClientGoneError();
 
-      if (outcome.kind === 'cancelled') {
+      if (outcome.kind === "cancelled") {
         cancelled += 1;
-        log.debug(`[${requestId}] ${c.gray('cancelled')} ${target} after ${ms(latency)} — another provider answered first`);
+        log.debug(`[${requestId}] ${c.gray("cancelled")} ${target} after ${ms(latency)}, another provider answered first`);
         continue;
       }
 
-      if (outcome.kind === 'fail') {
+      if (outcome.kind === "fail") {
         const info = outcome.error;
         const pause = recordFailure(task.entry.id, {
           reason: info.reason,
@@ -607,9 +608,9 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
         // A failure frees its slot immediately: no need to wait for the timer.
         const replaced = claimed === null ? launch() : false;
         log.warn(
-          `[${requestId}] ${c.yellow('failed')} ${target} [${info.reason}] ${info.message}` +
-            `${pause ? c.gray(` (benched ${ms(pause)})`) : ''}` +
-            c.gray(replaced ? ` → trying ${label(config, order[launched - 1])}` : inFlight.size ? ' → waiting on the others' : ' → no backup left'),
+          `[${requestId}] ${c.yellow("failed")} ${target} [${info.reason}] ${info.message}` +
+            `${pause ? c.gray(` (benched ${ms(pause)})`) : ""}` +
+            c.gray(replaced ? ` → trying ${label(config, order[launched - 1])}` : inFlight.size ? " → waiting on the others" : " → no backup left"),
         );
         continue;
       }
@@ -621,26 +622,26 @@ export async function run({ config, body, kind = 'chat', sink = null, clientGone
           message: outcome.error.message,
           cooldown: config.failover.cooldown,
         });
-        log.warn(`[${requestId}] ${c.yellow('degraded stream')} ${target} after ${ms(latency)}: ${outcome.error.message}`);
+        log.warn(`[${requestId}] ${c.yellow("degraded stream")} ${target} after ${ms(latency)}: ${outcome.error.message}`);
       } else {
         recordSuccess(task.entry.id, { latencyMs: latency, tokens: tokensOf(outcome.usage) });
         log.info(
-          `[${requestId}] ${c.green('ok')} ${target} (${place}${streaming ? ', stream' : ''}) ${ms(latency)}` +
-            `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ''}` +
-            `${dropped ? c.gray(` · ${dropped} speculative attempt(s) dropped`) : ''}`,
+          `[${requestId}] ${c.green("ok")} ${target} (${place}${streaming ? ", stream" : ""}) ${ms(latency)}` +
+            `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ""}` +
+            `${dropped ? c.gray(` · ${dropped} speculative attempt(s) dropped`) : ""}`,
         );
       }
 
       return streaming
-        ? { type: 'stream', entry: task.entry, provider: task.provider, attempts, cancelled: dropped, degraded: Boolean(outcome.degraded) }
-        : { type: 'json', json: outcome.json, entry: task.entry, provider: task.provider, attempts, cancelled: dropped };
+        ? { type: "stream", entry: task.entry, provider: task.provider, attempts, cancelled: dropped, degraded: Boolean(outcome.degraded) }
+        : { type: "json", json: outcome.json, entry: task.entry, provider: task.provider, attempts, cancelled: dropped };
     }
 
     return {
-      type: 'error',
+      type: "error",
       status: 502,
       message: `No provider could answer (${attempts.length} attempt(s) for "${matched}").`,
-      errorType: 'all_providers_failed',
+      errorType: "all_providers_failed",
       attempts,
     };
   } finally {
