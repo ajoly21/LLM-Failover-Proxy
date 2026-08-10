@@ -21,6 +21,23 @@ const SSE_HEADERS = {
   "x-accel-buffering": "no", // stop nginx-style buffering from delaying chunks
 };
 
+/**
+ * Path to hand to `fs.watch`, resolved to its real long form.
+ *
+ * On Windows, libuv compares the path it gets back from the OS with the one it
+ * was given, and *asserts* when they differ — which is what an 8.3 short name
+ * (`C:\Users\RUNNER~1\…`) or an unusual casing produces. That assertion is an
+ * abort, not an exception: the whole process dies, so no try/catch can save it.
+ * Resolving first keeps the two spellings identical.
+ */
+export function watchPath(target) {
+  try {
+    return fs.realpathSync.native(target);
+  } catch {
+    return target; // does not exist (yet): let fs.watch report it normally
+  }
+}
+
 /** Compact, locale-independent timestamp: `2026-07-31 09:41`. */
 const isoMinutes = (value) => new Date(value).toISOString().replace("T", " ").slice(0, 16);
 
@@ -396,7 +413,7 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   // Hot reload when the CLI rewrites the config.
   let debounce = null;
   try {
-    const watcher = fs.watch(config.__file, () => {
+    const watcher = fs.watch(watchPath(config.__file), () => {
       clearTimeout(debounce);
       debounce = setTimeout(() => app.reload("file changed"), 250);
     });
@@ -410,7 +427,7 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   let envDebounce = null;
   const envFile = envPathFor(config.__file);
   try {
-    const watcher = fs.watch(path.dirname(envFile), (_event, name) => {
+    const watcher = fs.watch(watchPath(path.dirname(envFile)), (_event, name) => {
       if (name && path.basename(name) !== path.basename(envFile)) return;
       clearTimeout(envDebounce);
       envDebounce = setTimeout(() => {
@@ -436,5 +453,17 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   app.server.once("close", dropRuntime);
   process.once("exit", dropRuntime);
 
-  return { ...app, port: actualPort, host: wantedHost, url: base };
+  // Spreading `app` would copy the value of its `config` getter once and freeze
+  // it, so a caller reading `app.config` after a hot reload would get the old
+  // chain. Forward the getter instead.
+  return {
+    server: app.server,
+    reload: app.reload,
+    get config() {
+      return app.config;
+    },
+    port: actualPort,
+    host: wantedHost,
+    url: base,
+  };
 }

@@ -324,7 +324,7 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 ```bash
 git clone <this repo> && cd llm-failover-proxy
 pnpm install
-pnpm test              # 84 tests, no network access
+pnpm test              # 86 tests, no network access
 node src/index.js      # run from source, no build step
 pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers
