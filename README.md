@@ -330,6 +330,15 @@ pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers
 ```
 
+Releases are cut from a tag, because an npm version can never be published twice:
+
+```bash
+npm version patch          # bumps package.json, commits, tags v1.0.1
+git push --follow-tags     # the tag is what triggers the publish
+```
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) tests every push and pull request on Linux and Windows, against Node 22 and 24. [`.github/workflows/release.yml`](.github/workflows/release.yml) reacts to a `v*` tag: it refuses a tag that disagrees with `package.json`, runs the tests, publishes to npm with build provenance, and opens the matching GitHub release. Nothing is published from a laptop, and no npm token is stored in the repository — npm authenticates the workflow itself through OIDC.
+
 The proxy itself, server, router, adapters, config, stats, is **dependency-free plain ESM**. Ink and React are used by the terminal UI only, as devDependencies: the build tree-shakes them into a single `dist/index.js`, which is why installing costs one file and no dependency tree.
 
 Two upstream protocols are supported per provider: **`openai`** (any OpenAI-compatible API, full pass-through of `tools`, `response_format`, vision and provider extensions) and **`anthropic`** (the Messages API, translated both ways, system prompt, `tools` ↔ `input_schema`, `tool_calls` ↔ `tool_use`, images, `stop_reason` ↔ `finish_reason`, streaming events → OpenAI chunks). Clients only ever see the OpenAI shape.

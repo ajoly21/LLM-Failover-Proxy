@@ -1,0 +1,53 @@
+name: Release
+
+# npm versions are immutable: the same version can never be published twice.
+# So the trigger is a tag, not a push to main — one tag, one release, one
+# version. `npm version patch && git push --follow-tags` is the whole ritual.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # to create the GitHub release
+  id-token: write # to prove to npm who is publishing (trusted publishing)
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # Trusted publishing (OIDC) needs a recent npm; it is what lets this
+      # workflow publish without any token stored in the repository.
+      - run: npm install -g npm@latest
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: The tag must be the version it claims to be
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p 'require("./package.json").version')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match package.json ($pkg) — nothing published" >&2
+            exit 1
+          fi
+
+      # Never publish something that does not pass its own tests.
+      - run: pnpm test
+
+      # `prepack` rebuilds dist/ here, so what ships is built from the tagged
+      # source rather than from whatever was last built on a laptop.
+      # --provenance links the tarball to this commit and this workflow.
+      - run: npm publish --provenance --access public
+
+      - name: Announce it on GitHub too
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
