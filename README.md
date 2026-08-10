@@ -140,7 +140,7 @@ llm-failover-proxy migrate      move keys out of the config file into the .env
 $ llmfp stats
 Persisted counters (nothing running, read from disk)
   kept since 2026-08-10 09:12 · 6 request(s), 3 ok, 0 failed, 3 cancelled, 51.9k token(s)
-  PRIO  TARGET                       REQ  OK  KO  CX  TOKENS  LAST LATENCY  BENCHED  LAST ERROR
+  PRIO  TARGET                       REQ  OK  KO  CX  TOKENS  LAST LATENCY  COOLDOWN  LAST ERROR
   1     nvidia/z-ai/glm-5.2          3    0   0   3   0       -             -        -
   2     opencode/laguna-s-2.1-free   3    3   0   0   51.9k   10.72s        -        -
 ```
@@ -300,7 +300,7 @@ A **cooldown is not a timeout.** A timeout ends one attempt; a cooldown decides 
 | `cooldown.failuresBeforeTrip` | 2 | consecutive failures that put a model aside. A `429` or an auth error puts it aside immediately, whatever this says |
 | `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long it stays aside: `baseMs` the first time, doubling with each new failure, capped at `maxMs`. A `Retry-After` from the provider wins over both. Any success clears it |
 
-A model set aside is still tried as a **last resort** when nothing else is available, and the remaining time shows up in the `BENCHED` column of `llmfp stats`.
+A model set aside is still tried as a **last resort** when nothing else is available, and the time it has left shows up in the `COOLDOWN` column of `llmfp stats`.
 
 ### Tests you run yourself
 

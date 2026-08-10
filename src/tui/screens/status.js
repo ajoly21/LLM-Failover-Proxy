@@ -69,9 +69,9 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
     { key: 'lastLatencyMs', label: 'LAST', align: 'right', width: 7, text: (row) => duration(row.lastLatencyMs) },
     {
       key: 'cooldown',
-      label: 'BENCHED',
+      label: 'COOLDOWN',
       align: 'right',
-      width: 7,
+      width: 8,
       text: (row) => (row.coolingDown ? duration(row.cooldownMsLeft) : '-'),
       color: (row) => (row.coolingDown ? COLOR.warn : undefined),
     },

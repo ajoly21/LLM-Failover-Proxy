@@ -189,7 +189,7 @@ function printStats(stats) {
     ),
   );
   table(
-    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "TOKENS", "LAST LATENCY", "BENCHED", "LAST ERROR"],
+    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "TOKENS", "LAST LATENCY", "COOLDOWN", "LAST ERROR"],
     stats.chain.map((row) => [
       row.priority,
       `${row.provider}/${row.model}`,
