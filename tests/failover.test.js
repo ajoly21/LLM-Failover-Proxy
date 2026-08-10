@@ -364,7 +364,7 @@ test("model probe measures time to first token and generation speed", async () =
   const mock = await startMock("ok", { name: "measured" });
   const { probeModel } = await import("../src/probe.js");
   const { provider, model } = backend(mock, { model: "m-1", alias: "a" });
-  const config = { failover: { firstTokenTimeoutMs: 5000 } };
+  const config = { probe: { timeoutMs: 5000 } };
   try {
     const result = await probeModel(config, model, provider);
     assert.equal(result.ok, true, result.message);
@@ -387,7 +387,7 @@ test("model probe retries without the usage hint when a provider rejects it", as
   const { probeModel } = await import("../src/probe.js");
   const { provider, model } = backend(mock, { model: "m-1", alias: "a" });
   try {
-    const result = await probeModel({ failover: { firstTokenTimeoutMs: 5000 } }, model, provider);
+    const result = await probeModel({ probe: { timeoutMs: 5000 } }, model, provider);
     assert.equal(result.ok, true, result.message);
     assert.equal(mock.calls, 2, "one rejected attempt, then one clean retry");
     assert.equal(mock.state.requests.at(-1).body.stream_options, undefined);
@@ -398,12 +398,35 @@ test("model probe retries without the usage hint when a provider rejects it", as
   }
 });
 
+test("the model test has its own deadline, independent of the request timeouts", async () => {
+  // A benchmark you run by hand and a request a user is waiting for do not
+  // deserve the same patience, so they no longer share a setting.
+  const slow = await startMock("ok", { name: "sluggish", delayMs: 2000 });
+  const { probeModel } = await import("../src/probe.js");
+  const { provider, model } = backend(slow, { model: "m-1", alias: "a" });
+  try {
+    const generous = { failover: { firstTokenTimeoutMs: 60000, idleTimeoutMs: 60000, requestTimeoutMs: 60000 } };
+
+    const tooSlow = await probeModel({ ...generous, probe: { timeoutMs: 1000 } }, model, provider);
+    assert.equal(tooSlow.ok, false, "the test gives up on its own deadline");
+    assert.match(tooSlow.message, /no token within/);
+    assert.ok(tooSlow.totalMs < 1800, `gave up in ${tooSlow.totalMs}ms, before the provider answered`);
+
+    // Raising only the test deadline is enough: nothing else changed.
+    const patient = await probeModel({ ...generous, probe: { timeoutMs: 8000 } }, model, provider);
+    assert.equal(patient.ok, true, patient.message);
+    assert.ok(patient.ttftMs >= 2000, "the same provider, given the time it needs");
+  } finally {
+    await slow.close();
+  }
+});
+
 test("model probe reports an empty stream as a failure", async () => {
   const mock = await startMock("empty", { name: "silent" });
   const { probeModel } = await import("../src/probe.js");
   const { provider, model } = backend(mock, { model: "m-1", alias: "a" });
   try {
-    const result = await probeModel({ failover: { firstTokenTimeoutMs: 5000 } }, model, provider);
+    const result = await probeModel({ probe: { timeoutMs: 5000 } }, model, provider);
     assert.equal(result.ok, false);
     assert.equal(result.ttftMs, null);
     assert.match(result.message, /empty answer/);

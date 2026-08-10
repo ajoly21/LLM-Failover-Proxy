@@ -1,7 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { describeKey } from "../../config.js";
-import { probeProvider } from "../../probe.js";
+import { probeProvider, probeTimeout } from "../../probe.js";
 import { h } from "../h.js";
 import { COLOR, SYMBOL, duration } from "../theme.js";
 import { Frame, Hints, Table } from "../widgets.js";
@@ -33,7 +33,7 @@ export function ProvidersScreen({ config, update, notify, navigate, onBack }) {
     for (const provider of providers) {
       (async () => {
         setTests((previous) => ({ ...previous, [provider.id]: { state: "running" } }));
-        const result = await probeProvider(provider);
+        const result = await probeProvider(provider, probeTimeout(config));
         if (runRef.current !== runId) return;
         setTests((previous) => ({
           ...previous,

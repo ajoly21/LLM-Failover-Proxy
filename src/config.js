@@ -54,6 +54,12 @@ export const DEFAULTS = {
       maxMs: 300000,
     },
   },
+  probe: {
+    // Deadline for one model or provider test from the terminal UI. Separate
+    // from the request deadlines above: a benchmark that hangs should not be
+    // governed by what production is willing to wait for, and vice versa.
+    timeoutMs: 15000,
+  },
   providers: [],
   models: [],
 };

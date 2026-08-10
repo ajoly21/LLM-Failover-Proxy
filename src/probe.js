@@ -7,7 +7,17 @@ import { createSseParser } from "./sse.js";
 /** Long enough to produce several tokens, short enough to stay cheap. */
 const DEFAULT_PROMPT = "In one short sentence, say what an HTTP proxy does.";
 const DEFAULT_MAX_TOKENS = 64;
-const GENERATION_BUDGET_MS = 60000;
+
+/**
+ * How long a single test may take, from the request to the last token.
+ *
+ * One deadline for the whole probe rather than one per phase: a test either
+ * finishes in time or it does not, and "how long am I willing to wait for a
+ * benchmark" is a different question from "how long may a real request take".
+ */
+export function probeTimeout(config) {
+  return Math.max(1000, Number(config?.probe?.timeoutMs) || 15000);
+}
 
 function deadline(timeoutMs) {
   const controller = new AbortController();
@@ -27,7 +37,7 @@ function shortError(text) {
 }
 
 /** Checks that a provider is reachable, through its `/models` endpoint. */
-export async function probeProvider(provider, timeoutMs = 15000) {
+export async function probeProvider(provider, timeoutMs = probeTimeout()) {
   const adapter = adapterFor(provider);
   const url = `${provider.baseUrl.replace(/\/+$/, "")}/models`;
   const { signal, clear } = deadline(timeoutMs);
@@ -76,19 +86,10 @@ export async function probeModel(config, entry, provider, options = {}) {
 
 async function streamProbe(config, entry, provider, { prompt = DEFAULT_PROMPT, maxTokens = DEFAULT_MAX_TOKENS, includeUsage = true } = {}) {
   const adapter = adapterFor(provider);
-  const firstTokenMs = Math.max(3000, Number(config?.failover?.firstTokenTimeoutMs) || 15000);
+  const limit = probeTimeout(config);
 
   const controller = new AbortController();
   let timer = null;
-  const arm = (delay, why) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      const err = new Error(why);
-      err.name = "TimeoutError";
-      err.timeoutReason = why;
-      controller.abort(err);
-    }, delay);
-  };
 
   const body = {
     model: entry.model,
@@ -120,7 +121,16 @@ async function streamProbe(config, entry, provider, { prompt = DEFAULT_PROMPT, m
   };
 
   try {
-    arm(firstTokenMs, `no token within ${ms(firstTokenMs)}`);
+    // Armed once for the whole test, never re-armed: the message says which
+    // phase ran out of time, but the budget covers all of them.
+    timer = setTimeout(() => {
+      const why = ttftMs == null ? `no token within ${ms(limit)}` : `answer unfinished after ${ms(limit)}`;
+      const err = new Error(why);
+      err.name = "TimeoutError";
+      err.timeoutReason = why;
+      controller.abort(err);
+    }, limit);
+
     const response = await fetch(adapter.chatEndpoint(provider), {
       method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
@@ -165,10 +175,7 @@ async function streamProbe(config, entry, provider, { prompt = DEFAULT_PROMPT, m
         for (const frame of out.frames) {
           if (frame.usage) usage = frame.usage;
           if (!frame.hasContent) continue;
-          if (ttftMs == null) {
-            ttftMs = Date.now() - startedAt;
-            arm(GENERATION_BUDGET_MS, `generation exceeded ${ms(GENERATION_BUDGET_MS)}`);
-          }
+          if (ttftMs == null) ttftMs = Date.now() - startedAt;
           contentChunks += 1;
           const delta = JSON.parse(frame.data).choices?.[0]?.delta;
           if (typeof delta?.content === "string") text += delta.content;

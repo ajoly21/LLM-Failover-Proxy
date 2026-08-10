@@ -170,7 +170,7 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 
 **Models & priority**, the chain, in failover order. `⇧↑`/`⇧↓` (or `J`/`K`) move a model up or down.
 
-**Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row.
+**Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
 ```
   #  ALIAS  PROVIDER    MODEL                ON     TTFT   TOK/S
@@ -275,6 +275,12 @@ Three different deadlines, because "too slow" means different things before and 
 | `firstTokenTimeoutMs` | 15000 | a streamed answer has not **started** |
 | `idleTimeoutMs` | 60000 | a started stream has gone **quiet** for that long |
 
+And one deadline that has nothing to do with serving requests:
+
+| Key | Default | Expires when |
+|---|---|---|
+| `probe.timeoutMs` | 15000 | a **test you started yourself** (`t` on the Models screen, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+
 ### Trying several models
 
 | Key | Default | What it does |
@@ -324,7 +330,7 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 ```bash
 git clone <this repo> && cd llm-failover-proxy
 pnpm install
-pnpm test              # 86 tests, no network access
+pnpm test              # 87 tests, no network access
 node src/index.js      # run from source, no build step
 pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers

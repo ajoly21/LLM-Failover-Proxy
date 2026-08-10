@@ -88,6 +88,15 @@ export const SETTINGS = [
     set: (c, v) => { c.failover.idleTimeoutMs = clamp(v, 1000, 600000, 60000); },
   },
   {
+    label: 'model test timeout',
+    type: 'number',
+    unit: 'ms',
+    hint: 'How long one model may take when you test the chain from Models & priority.',
+    example: 'only for the tests you run yourself; the deadlines above govern real requests',
+    get: (c) => c.probe.timeoutMs,
+    set: (c, v) => { c.probe.timeoutMs = clamp(v, 1000, 300000, 15000); },
+  },
+  {
     label: 'hedge delay',
     type: 'number',
     unit: 'ms',
