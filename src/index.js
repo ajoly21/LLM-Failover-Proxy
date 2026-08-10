@@ -16,7 +16,7 @@ import {
 } from './daemon.js';
 import { startServer } from './server.js';
 import { flushStats } from './state.js';
-import { openInterface, showStatus } from './cli.js';
+import { openInterface, showStats, showStatus } from './cli.js';
 import { c, log } from './logger.js';
 
 const HELP = `
@@ -35,7 +35,8 @@ const HELP = `
     restart         restart the background proxy
     enable          run in the background now, and at every login
     disable         remove the login entry and stop the background proxy
-    status          configuration, failover order, live counters, service state
+    status          configuration, failover order, counters, service state
+    stats           just the counters table, then back to the shell (--json to pipe it)
     logs            show the end of the background log
     migrate         move keys out of the configuration file into the .env
     help, version
@@ -46,6 +47,7 @@ const HELP = `
     --port <n>       listen port (default: ${DEFAULT_PORT}; a free port is picked if taken)
     --host <addr>    listen address (default: 127.0.0.1)
     --lines <n>      how many log lines ${c.gray('(logs, default 40)')}
+    --json           machine-readable output ${c.gray('(stats)')}
 
   ${c.bold('Keys')}
     API keys live in a ${c.bold('.env')} next to the configuration file, never inside it.
@@ -59,7 +61,7 @@ const HELP = `
 `;
 
 function parseArgs(argv) {
-  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40 };
+  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--config' || arg === '-c') options.configFile = argv[++i];
@@ -67,6 +69,7 @@ function parseArgs(argv) {
     else if (arg === '--host') options.host = argv[++i];
     else if (arg === '--lines' || arg === '-n') options.lines = Number(argv[++i]) || 40;
     else if (arg === '--daemon' || arg === '--background' || arg === '-d') options.daemon = true;
+    else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') options.command = 'help';
     else if (arg === '--version' || arg === '-v') options.command = 'version';
     else if (!arg.startsWith('-') && !options.command) options.command = arg;
@@ -257,6 +260,13 @@ async function main() {
     case 'status':
     case 'list': {
       await showStatus(loadConfig(options.configFile));
+      return;
+    }
+
+    // One shot, then the shell is yours again — the UI screen is the live one.
+    case 'stats':
+    case 'counters': {
+      await showStats(loadConfig(options.configFile), { json: options.json });
       return;
     }
 

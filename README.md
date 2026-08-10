@@ -121,6 +121,7 @@ Every answer says who served it, in the response headers: `x-llm-proxy-provider`
 llm-failover-proxy              open the terminal UI
 llm-failover-proxy setup        run the setup wizard again
 llm-failover-proxy status       what is configured, what is running, live counters
+llm-failover-proxy stats        just the counters table, then back to the shell
 llm-failover-proxy logs         end of the background log
 llm-failover-proxy stop         stop the background proxy
 llm-failover-proxy restart      restart it
@@ -132,6 +133,17 @@ llm-failover-proxy migrate      move keys out of the config file into the .env
 ```
 
 `llmfp` is a shorter alias for the same command. Add `--config <path>` to work on another configuration, `--port`/`--host` to change where it listens.
+
+`stats` prints once and returns — the *Status & stats* screen of the UI is the live one, refreshing every two seconds until you leave it. Use `stats` in a script or when you just want a number back, and `stats --json` to pipe it somewhere. Counters are read from the running proxy when there is one, and from the file on disk when there is not, so the numbers are there even after a restart:
+
+```
+$ llmfp stats
+Persisted counters (nothing running — read from disk)
+  kept since 2026-08-10 09:12 · 6 request(s), 3 ok, 0 failed, 3 cancelled, 51.9k token(s)
+  PRIO  TARGET                       REQ  OK  KO  CX  TOKENS  LAST LATENCY  BENCHED  LAST ERROR
+  1     nvidia/z-ai/glm-5.2          3    0   0   3   0       -             -        -
+  2     opencode/laguna-s-2.1-free   3    3   0   0   51.9k   10.72s        -        -
+```
 
 ### The terminal UI
 
@@ -280,7 +292,7 @@ It binds to `127.0.0.1`, so it is only reachable from your machine. To expose it
 ```bash
 git clone <this repo> && cd llm-failover-proxy
 pnpm install
-pnpm test              # 78 tests, no network access
+pnpm test              # 82 tests, no network access
 node src/index.js      # run from source, no build step
 pnpm run build         # bundle dist/index.js
 pnpm run demo          # live failover demo against three fake providers

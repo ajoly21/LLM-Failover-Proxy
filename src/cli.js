@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { describeKey, getProvider, inlineKeys, loadConfig, providerLabel, resolveSecret } from './config.js';
+import { describeKey, getProvider, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from './config.js';
 import { envPathFor } from './env.js';
 import { autostartInstalled, autostartTarget, daemonStatus } from './daemon.js';
 import { resolveChain } from './router.js';
@@ -108,46 +108,146 @@ export async function showStatus(config) {
     );
   }
 
-  // A background instance may have landed on another port than the configured one.
-  const base = service.url || `http://${config.server.host}:${config.server.port}`;
-  const url = `${base}/stats`;
+  const stats = (await liveStats(config)) ?? statsFromDisk(config);
+  say('');
+  if (!stats) say(c.gray(`  (no counters yet — nothing has been served from this configuration)`));
+  else printStats(stats);
+  say('');
+}
+
+/* ------------------------------------------------------------------ *
+ * Counters — `stats`, and the tail of `status`                         *
+ * ------------------------------------------------------------------ */
+
+/** Where a running proxy would answer: a background instance may hold another port. */
+function statsUrl(config) {
+  const base = daemonStatus(config.__file).url || `http://${config.server.host}:${config.server.port}`;
+  return `${base}/stats`;
+}
+
+/** Counters of a running proxy, including what is only in memory. */
+async function liveStats(config) {
   const proxyKey = resolveSecret(config.server.apiKey);
   try {
-    const response = await fetch(url, {
+    const response = await fetch(statsUrl(config), {
       headers: proxyKey ? { authorization: `Bearer ${proxyKey}` } : {},
       signal: AbortSignal.timeout(1500),
     });
-    if (response.ok) {
-      const stats = await response.json();
-      say('');
-      say(`${c.bold('Running server')} ${c.gray(`(uptime ${stats.uptimeSec}s)`)}`);
-      say(
-        c.gray(
-          `  counters kept since ${shortDate(stats.statsSince)} · ${compact(stats.totals.requests)} request(s), ` +
-            `${compact(stats.totals.successes)} ok, ${compact(stats.totals.failures)} failed, ` +
-            `${compact(stats.totals.cancelled)} cancelled, ${compact(stats.totals.tokens)} token(s)`,
-        ),
-      );
-      table(
-        ['PRIO', 'TARGET', 'REQ', 'OK', 'KO', 'CX', 'TOKENS', 'LAST LATENCY', 'BENCHED', 'LAST ERROR'],
-        stats.chain.map((row) => [
-          row.priority,
-          `${row.provider}/${row.model}`,
-          compact(row.requests),
-          c.green(compact(row.successes)),
-          row.failures ? c.red(compact(row.failures)) : '0',
-          row.cancelled ? c.yellow(compact(row.cancelled)) : '0',
-          compact(row.tokens),
-          ms(row.lastLatencyMs),
-          row.coolingDown ? c.yellow(ms(row.cooldownMsLeft)) : c.gray('-'),
-          row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray('-'),
-        ]),
-      );
-    }
+    if (!response.ok) return null;
+    return { ...(await response.json()), source: 'server' };
   } catch {
-    say('');
-    say(c.gray(`  (no server reachable on ${url})`));
+    return null;
   }
+}
+
+/**
+ * Same shape, read straight from the persisted file: counters outlive the
+ * process, so `stats` is still useful when nothing is running.
+ */
+function statsFromDisk(config) {
+  const file = statsPathFor(config.__file);
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+  const saved = raw?.entries && typeof raw.entries === 'object' ? raw.entries : {};
+  const now = Date.now();
+  const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+
+  const chain = config.models.map((entry, index) => {
+    const state = saved[entry.id] ?? {};
+    return {
+      priority: index + 1,
+      provider: providerLabel(config, entry.providerId),
+      model: entry.model,
+      requests: num(state.requests),
+      successes: num(state.successes),
+      failures: num(state.failures),
+      cancelled: num(state.cancelled),
+      tokens: num(state.tokens),
+      lastLatencyMs: state.lastLatencyMs ?? null,
+      coolingDown: num(state.cooldownUntil) > now,
+      cooldownMsLeft: Math.max(0, num(state.cooldownUntil) - now),
+      lastError: state.lastError ?? null,
+    };
+  });
+
+  const total = (key) => chain.reduce((sum, row) => sum + row[key], 0);
+  return {
+    source: 'file',
+    file,
+    statsSince: Number.isFinite(raw?.since) ? raw.since : null,
+    updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt : null,
+    totals: {
+      requests: total('requests'),
+      successes: total('successes'),
+      failures: total('failures'),
+      cancelled: total('cancelled'),
+      tokens: total('tokens'),
+    },
+    chain,
+  };
+}
+
+function printStats(stats) {
+  say(
+    stats.source === 'server'
+      ? `${c.bold('Running server')} ${c.gray(`(uptime ${stats.uptimeSec}s)`)}`
+      : `${c.bold('Persisted counters')} ${c.gray('(nothing running — read from disk)')}`,
+  );
+  say(
+    c.gray(
+      `  kept since ${stats.statsSince ? shortDate(stats.statsSince) : '?'} · ${compact(stats.totals.requests)} request(s), ` +
+        `${compact(stats.totals.successes)} ok, ${compact(stats.totals.failures)} failed, ` +
+        `${compact(stats.totals.cancelled)} cancelled, ${compact(stats.totals.tokens)} token(s)`,
+    ),
+  );
+  table(
+    ['PRIO', 'TARGET', 'REQ', 'OK', 'KO', 'CX', 'TOKENS', 'LAST LATENCY', 'BENCHED', 'LAST ERROR'],
+    stats.chain.map((row) => [
+      row.priority,
+      `${row.provider}/${row.model}`,
+      compact(row.requests),
+      c.green(compact(row.successes)),
+      row.failures ? c.red(compact(row.failures)) : '0',
+      row.cancelled ? c.yellow(compact(row.cancelled)) : '0',
+      compact(row.tokens),
+      ms(row.lastLatencyMs),
+      row.coolingDown ? c.yellow(ms(row.cooldownMsLeft)) : c.gray('-'),
+      row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray('-'),
+    ]),
+  );
+}
+
+/**
+ * One-shot counters report: prints and returns. The Status screen of the UI
+ * polls instead, which is what you want while watching traffic — this is what
+ * you want in a script, or in a shell you need back.
+ */
+export async function showStats(config, { json = false } = {}) {
+  const stats = (await liveStats(config)) ?? statsFromDisk(config);
+
+  if (!stats) {
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ source: 'none', totals: null, chain: [] }, null, 2)}\n`);
+      return;
+    }
+    say('');
+    say(c.gray('  no counters yet — the proxy has not served anything from this configuration'));
+    say(c.gray(`  (looked for a server on ${statsUrl(config)} and for ${statsPathFor(config.__file)})`));
+    say('');
+    return;
+  }
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify(stats, null, 2)}\n`);
+    return;
+  }
+
+  say('');
+  printStats(stats);
   say('');
 }
 
