@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { applyCatalog, loadCatalog } from "./catalog.js";
 import { openInterface, showDoctor, showStats, showStatus } from "./cli.js";
-import { DEFAULT_PORT, configExists, configPath, loadConfig, migrateKeys, resolveSecret, saveConfig } from "./config.js";
+import { DEFAULT_PORT, configExists, configPath, loadConfig, resolveSecret, saveConfig } from "./config.js";
 import { installAutostart, logPathFor, logTail, orphaned, removeAutostart, removeServiceCopy, restartDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
 import { packageVersion } from "./install.js";
@@ -29,7 +29,6 @@ const HELP = `
     stats           just the counters table, then back to the shell (--json to pipe it)
     logs            show the end of the background log
     doctor          check this install: PATH, paths in the login entry, keys, service
-    migrate         move keys out of the configuration file into the .env
     help, version
 
   ${c.bold("Options")}
@@ -261,20 +260,6 @@ async function main() {
     case "doctor":
     case "check": {
       await showDoctor(loadConfig(options.configFile), { json: options.json, pathOnly: options.pathOnly });
-      return;
-    }
-
-    case "migrate":
-    case "migrate-keys": {
-      const { moved, envFile } = migrateKeys(loadConfig(options.configFile));
-      say("");
-      if (!moved.length) say(`  ${c.green("nothing to move")} ${c.gray("— no key is stored in the configuration file")}`);
-      else {
-        say(`  ${c.green(`moved ${moved.length} key(s)`)} to ${envFile}`);
-        for (const entry of moved) say(`    ${c.gray(entry.target)} → ${entry.envVar}`);
-        say(`  ${c.gray("the configuration file now only holds env:NAME references")}`);
-      }
-      say("");
       return;
     }
 

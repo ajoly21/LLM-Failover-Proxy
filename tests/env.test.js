@@ -13,7 +13,7 @@ import {
   upsertEnv,
 } from '../src/env.js';
 import { CATALOG_FILE, applyCatalog, catalogKeys, loadCatalog, renderEnvExample } from '../src/catalog.js';
-import { describeKey, envVarName, inlineKeys, loadConfig, migrateKeys, resolveSecret, saveConfig } from '../src/config.js';
+import { describeKey, envVarName, inlineKeys, loadConfig, resolveSecret, saveConfig } from '../src/config.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 
@@ -197,7 +197,11 @@ test('.env.example lists every variable the catalogue needs', async () => {
   assert.deepEqual(filled, [], 'the example never ships a value');
 });
 
-test('migrating moves keys out of the config file and leaves references behind', async () => {
+test('a key left in an old config file still works, and is still pointed out', async () => {
+  // There is no command to move keys any more: every screen that takes one
+  // writes it to the .env. A config written by an older version can still hold
+  // one, so it has to keep working — and keep being flagged, since a config
+  // file is the thing people share.
   const dir = await tempDir();
   const file = path.join(dir, 'config.json');
   const config = loadConfig(file);
@@ -208,28 +212,13 @@ test('migrating moves keys out of the config file and leaves references behind',
     { id: 'prov_3', name: 'groq', type: 'openai', baseUrl: 'http://c/v1', apiKey: 'env:GROQ_API_KEY', headers: {}, enabled: true },
   );
   saveConfig(config, file);
-  assert.deepEqual(inlineKeys(config), ['nvidia', 'the proxy itself']);
-
-  const { moved, envFile } = migrateKeys(config, file);
   try {
-    assert.deepEqual(moved.map((entry) => entry.envVar), ['NVIDIA_API_KEY', 'LLM_PROXY_API_KEY']);
-    assert.equal(envFile, envPathFor(file));
+    assert.deepEqual(inlineKeys(config), ['nvidia', 'the proxy itself'], 'a keyless provider and an env: reference are not flagged');
 
     const stored = loadConfig(file);
-    assert.equal(stored.providers[0].apiKey, 'env:NVIDIA_API_KEY');
-    assert.equal(stored.providers[1].apiKey, null, 'a keyless provider is untouched');
-    assert.equal(stored.providers[2].apiKey, 'env:GROQ_API_KEY', 'an existing reference is untouched');
-    assert.equal(stored.server.apiKey, 'env:LLM_PROXY_API_KEY');
-    assert.doesNotMatch(await fs.readFile(file, 'utf8'), /nvapi-secret|sk-proxy-secret/);
-
-    const values = readEnvFile(envFile);
-    assert.equal(values.NVIDIA_API_KEY, 'nvapi-secret');
-    assert.equal(values.LLM_PROXY_API_KEY, 'sk-proxy-secret');
-    assert.equal(resolveSecret('env:NVIDIA_API_KEY'), 'nvapi-secret', 'the key still resolves after the move');
-
-    // Idempotent: nothing left to move.
-    assert.deepEqual(migrateKeys(loadConfig(file), file).moved, []);
-    assert.deepEqual(inlineKeys(loadConfig(file)), []);
+    assert.equal(resolveSecret(stored.providers[0].apiKey), 'nvapi-secret', 'the request can still be signed');
+    assert.equal(describeKey(stored.providers[0].apiKey).state, 'inline', 'and the UI colours it as such');
+    assert.doesNotMatch(describeKey(stored.providers[0].apiKey).text, /nvapi-secret/, 'without printing it');
   } finally {
     resetEnvCache();
     await fs.rm(dir, { recursive: true, force: true });

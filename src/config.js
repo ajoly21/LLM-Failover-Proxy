@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { envPathFor, envValue, upsertEnv } from "./env.js";
+import { envValue } from "./env.js";
 
 /** Uncommon port, away from the usual dev ranges (3000/5000/8000/8080/11434...). */
 export const DEFAULT_PORT = 47821;
@@ -226,35 +226,6 @@ export function inlineKeys(config) {
   const found = config.providers.filter((provider) => isInline(provider.apiKey)).map((provider) => provider.name);
   if (isInline(config.server.apiKey)) found.push("the proxy itself");
   return found;
-}
-
-/**
- * Moves every key out of the config file and into the `.env` beside it,
- * replacing it with an `env:NAME` reference. Idempotent, and safe to run on a
- * config that has already been migrated.
- */
-export function migrateKeys(config, file = config.__file || configPath()) {
-  const envFile = envPathFor(file);
-  const moved = [];
-
-  for (const provider of config.providers) {
-    const key = provider.apiKey;
-    if (!key || (typeof key === "string" && key.startsWith("env:"))) continue;
-    const variable = envVarName(provider.name);
-    upsertEnv(envFile, { [variable]: key });
-    provider.apiKey = `env:${variable}`;
-    moved.push({ target: provider.name, envVar: variable });
-  }
-
-  const serverKey = config.server.apiKey;
-  if (serverKey && !(typeof serverKey === "string" && serverKey.startsWith("env:"))) {
-    upsertEnv(envFile, { LLM_PROXY_API_KEY: serverKey });
-    config.server.apiKey = "env:LLM_PROXY_API_KEY";
-    moved.push({ target: "the proxy itself", envVar: "LLM_PROXY_API_KEY" });
-  }
-
-  if (moved.length) saveConfig(config, file);
-  return { moved, envFile };
 }
 
 export function getProvider(config, providerId) {

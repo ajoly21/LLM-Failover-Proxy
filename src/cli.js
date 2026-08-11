@@ -73,7 +73,7 @@ export async function showStatus(config) {
     const inline = inlineKeys(config);
     if (inline.length) {
       say("");
-      say(`  ${c.yellow(`${inline.length} key(s) still stored in the configuration file`)} ` + c.gray("— `llm-failover-proxy migrate` moves them to the .env"));
+      say(`  ${c.yellow(`${inline.length} key(s) still stored in the configuration file`)} ` + c.gray("— retype it in the UI and it is saved to the .env instead"));
     }
   }
 

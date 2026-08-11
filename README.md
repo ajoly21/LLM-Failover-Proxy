@@ -185,7 +185,6 @@ llm-failover-proxy enable       run in the background now, and at every login
 llm-failover-proxy disable      remove the login entry and stop it
 llm-failover-proxy start        run in this terminal instead (ctrl+c to stop)
 llm-failover-proxy start -d     run in the background
-llm-failover-proxy migrate      move keys out of the config file into the .env
 llm-failover-proxy doctor       is this install usable from any shell?
 ```
 
@@ -289,7 +288,7 @@ The configuration file is looked up in this order: `--config <path>`, `$LLM_PROX
 
 The `.env` is read from the current directory **and** from the folder holding the configuration file, so both a project-local and a machine-wide setup work. A real environment variable always wins over the file, handy in Docker or CI, where you can skip the `.env` entirely and just pass `NVIDIA_API_KEY=…`.
 
-Upgrading from an older version that stored keys inside `config.json`? `llm-failover-proxy migrate` moves them to the `.env` and leaves `env:` references behind. `status` reminds you if any are left.
+Every screen that takes a key writes it to the `.env` and stores only an `env:NAME` reference, so there is nothing to migrate and no command to run. A key left inside `config.json` by an older version keeps working; `status` points it out, and retyping it in the UI is what moves it.
 
 ### Changing the default chain
 

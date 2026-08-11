@@ -8,7 +8,7 @@ import { render } from 'ink-testing-library';
 import { h } from '../src/tui/h.js';
 import { App } from '../src/tui/app.js';
 import { loadConfig } from '../src/config.js';
-import { resetEnvCache } from '../src/env.js';
+import { envPathFor, readEnvFile, resetEnvCache } from '../src/env.js';
 import { SETTINGS } from '../src/tui/screens/settings.js';
 import { PRESETS } from '../src/presets.js';
 import { startMock } from './mock-provider.js';
@@ -596,6 +596,35 @@ test('settings toggle booleans, cycle enums and edit numbers in place', async ()
     await tick();
     assert.equal(app.config().server.cors, false);
   } finally {
+    await app.close();
+  }
+});
+
+test('the proxy key is written to the .env, whether it is typed or generated', async () => {
+  // The only screen that used to put a secret in the config file. There is no
+  // command to move keys any more, so this path has to be right on its own.
+  const app = await mount({ view: { name: 'settings' } });
+  try {
+    await app.press(KEY.down, 2); // proxy API key
+    await app.press(KEY.enter); // open the editor
+    await app.type('sk-typed-by-hand');
+    await app.press(KEY.enter);
+    await tick();
+
+    assert.equal(app.config().server.apiKey, 'env:LLM_PROXY_API_KEY', 'the config holds the reference');
+    assert.doesNotMatch(await fs.readFile(app.file, 'utf8'), /sk-typed-by-hand/, 'and never the key itself');
+    resetEnvCache();
+    assert.equal(readEnvFile(envPathFor(app.file)).LLM_PROXY_API_KEY, 'sk-typed-by-hand');
+
+    // `g` takes the same route, and overwrites the variable rather than the config.
+    await app.press('g');
+    await tick();
+    assert.equal(app.config().server.apiKey, 'env:LLM_PROXY_API_KEY');
+    resetEnvCache();
+    const generated = readEnvFile(envPathFor(app.file)).LLM_PROXY_API_KEY;
+    assert.match(generated, /^sk-proxy-[0-9a-f]{40}$/, 'a fresh key landed in the .env');
+  } finally {
+    resetEnvCache();
     await app.close();
   }
 });

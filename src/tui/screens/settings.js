@@ -6,6 +6,7 @@ import { useLayout } from '../size.js';
 import { COLOR, SYMBOL, cell, windowAround } from '../theme.js';
 import { Frame, Hints, TextField, editText } from '../widgets.js';
 import { maskSecret } from '../../config.js';
+import { envPathFor, upsertEnv } from '../../env.js';
 
 /**
  * Declarative setting list: read from and written back to the config draft.
@@ -55,9 +56,12 @@ export const SETTINGS = [
     label: 'proxy API key',
     type: 'secret',
     hint: 'Key your own apps must send to be allowed through.',
-    example: 'empty = no check, fine on 127.0.0.1 · g generates one · env:NAME reads it from .env',
+    example: 'empty = no check, fine on 127.0.0.1 · g generates one · env:NAME reuses a variable',
     get: (c) => c.server.apiKey,
     set: (c, v) => { c.server.apiKey = v || null; },
+    // Like a provider key: the secret goes to the .env and the config keeps only
+    // the reference, so the config file stays something you can share.
+    envVar: 'LLM_PROXY_API_KEY',
     mask: true,
   },
   {
@@ -257,8 +261,30 @@ export function SettingsScreen({ config, update, notify, onBack }) {
   // value it is there to introduce.
   const labelWidth = Math.min(Math.max(...SETTINGS.map((entry) => entry.label.length)), Math.max(12, layout.inner - 14));
 
+  /**
+   * What actually gets written to the config. A secret with an `envVar` is put
+   * in the .env beside the config and replaced by its `env:NAME` reference, so
+   * no key is ever stored in the file. `undefined` means the .env could not be
+   * written, and nothing should be saved.
+   */
+  const toStored = (value) => {
+    if (!setting.envVar) return value;
+    const typed = String(value ?? '').trim();
+    if (!typed) return null;
+    if (typed.startsWith('env:')) return typed; // already points at a variable
+    try {
+      upsertEnv(envPathFor(config.__file), { [setting.envVar]: typed });
+    } catch (err) {
+      notify(`could not write .env: ${err.message}`, COLOR.fail);
+      return undefined;
+    }
+    return `env:${setting.envVar}`;
+  };
+
   const commit = (value) => {
-    update((next) => setting.set(next, value));
+    const stored = toStored(value);
+    if (stored === undefined) return;
+    update((next) => setting.set(next, stored));
     setDraft(null);
     notify(`${setting.label} updated`);
   };
@@ -288,7 +314,10 @@ export function SettingsScreen({ config, update, notify, onBack }) {
       update((next) => setting.set(next, setting.options[(index + step + setting.options.length) % setting.options.length]));
     } else if (setting.mask && input === 'g') {
       const generated = `sk-proxy-${crypto.randomBytes(20).toString('hex')}`;
-      update((next) => setting.set(next, generated));
+      const stored = toStored(generated);
+      if (stored === undefined) return;
+      update((next) => setting.set(next, stored));
+      // Shown once, because it is now in the .env and the screen will not show it again.
       notify(`generated ${generated}`, COLOR.warn);
     } else if (key.return || input === ' ') {
       setDraft(String(setting.get(config) ?? ''));
