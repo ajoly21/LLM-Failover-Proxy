@@ -53,6 +53,23 @@ export function ms(value) {
 }
 
 /**
+ * How long ago something happened: `23s ago`, `2min ago`, `3h ago`, `5d ago`.
+ * Never `0s ago`, since under a second is still a second, and `-` when it never
+ * happened at all — "just now" and "never" must not look alike.
+ */
+export function ago(timestamp, now = Date.now()) {
+  const at = Number(timestamp);
+  if (!Number.isFinite(at) || at <= 0) return "-";
+  const seconds = Math.max(1, Math.round((now - at) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+/**
  * A share, as `42%`. A ratio with no denominator has no value to show — `0%`
  * would claim a measurement that was never taken — so it reads `-` instead.
  * Small shares keep one decimal, or every rare model would round to `0%`.

@@ -173,22 +173,32 @@ llm-failover-proxy doctor       is this install usable from any shell?
 $ llmfp stats
 Persisted counters (nothing running, read from disk)
   kept since 2026-08-10 09:12 · 9 request(s), 4 ok, 1 failed, 4 cancelled, 51.9k token(s)
-  PRIO  TARGET                       REQ  OK  KO  CX  USE  OK%   TOKENS  LAST LATENCY  LAST ERROR
-  1     nvidia/z-ai/glm-5.2          5    1   1   3   25%  50%   12.1k   8.30s         empty: no content
-  2     opencode/laguna-s-2.1-free   4    3   0   1   75%  100%  39.8k   10.72s        -
+  PRIO  TARGET                       REQ  OK  KO  CX  USE  UPTIME  TOKENS  LAST USED  LAST ERROR
+  1     nvidia/z-ai/glm-5.2          5    1   1   3   25%  50%     12.1k   14min ago  empty: no content
+  2     opencode/laguna-s-2.1-free   4    3   0   1   75%  100%    39.8k   23s ago    -
+
+  last 4 answered
+  WHEN       MODEL
+  23s ago    opencode/laguna-s-2.1-free
+  2min ago   opencode/laguna-s-2.1-free
+  14min ago  nvidia/z-ai/glm-5.2
+  1h ago     opencode/laguna-s-2.1-free
 ```
 
-| Column       | Reads as                                                                                                               |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| `REQ`        | times this model was asked, racing attempts included                                                                   |
-| `OK` / `KO`  | answers it delivered / attempts that failed                                                                             |
-| `CX`         | attempts dropped because a faster model had already answered — this is why `REQ` can exceed `OK + KO`                  |
-| `USE`        | its share of the answers you actually got: how much of your traffic this model is really serving                        |
-| `OK%`        | of the attempts it was allowed to finish, how many it answered. Dropped races are excluded — losing one is not a fault  |
-| `TOKENS`     | tokens it has produced, accumulated across restarts                                                                    |
-| `LAST ERROR` | why it failed the last time, if it has                                                                                 |
+| Column       | Reads as                                                                                              |
+| ------------ | ----------------------------------------------------------------------------------------------------- |
+| `REQ`        | times this model was asked, racing attempts included                                                  |
+| `OK` / `KO`  | answers it delivered / attempts that failed                                                           |
+| `CX`         | attempts dropped because a faster model had already answered — this is why `REQ` can exceed `OK + KO` |
+| `USE`        | its share of the answers you actually got: how much of your traffic this model really serves           |
+| `UPTIME`     | availability: of the attempts it was allowed to finish, how many it answered                           |
+| `TOKENS`     | tokens it has produced, accumulated across restarts                                                   |
+| `LAST USED`  | how long since it last answered. An entry nothing ever reaches reads `-`                              |
+| `LAST ERROR` | why it failed the last time, if it has                                                                |
 
-Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain that it is never reached, or it fails when it is — `OK%` tells you which.
+Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced against. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain never to be reached, or it fails when it is — `UPTIME` tells you which.
+
+The rows are always in **your** priority order, the same as the _Models & priority_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
 
 ### The terminal UI
 

@@ -636,8 +636,85 @@ test('the status screen shows the failover order and live counters', async () =>
     view: { name: 'status', fetchStats: async () => stats },
   });
   try {
-    assert.match(app.frame(), /failover order for model="auto"/);
-    assert.match(app.frame(), /groq\/llama/);
+    const frame = app.frame();
+    assert.match(frame, /TARGET/);
+    assert.match(frame, /groq\/llama/);
+    assert.match(frame, /UPTIME/, 'availability, not the ratio it is computed from');
+    assert.match(frame, /LAST USED/);
+    assert.doesNotMatch(frame, /failover order/, 'the table is the chain, in order: no second list of the same thing');
+  } finally {
+    await app.close();
+  }
+});
+
+test('the last answered requests are listed under the counters, with their age', async () => {
+  const now = Date.now();
+  const stats = {
+    uptimeSec: 300,
+    statsSince: Date.UTC(2026, 7, 11, 8, 0),
+    totals: { requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30 },
+    chain: [{ id: 'mdl_llama', priority: 1, provider: 'groq', model: 'llama', requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30, lastUsedAt: now - 4000 }],
+    recent: [
+      { id: 'mdl_llama', at: now - 4000, provider: 'groq', model: 'llama', alias: 'llama' },
+      { id: 'mdl_llama', at: now - 90_000, provider: 'groq', model: 'llama', alias: 'llama' },
+      { id: 'mdl_llama', at: now - 7_200_000, provider: 'groq', model: 'llama', alias: 'llama' },
+    ],
+  };
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('llama', 'groq')],
+    view: { name: 'status', fetchStats: async () => stats },
+  });
+  try {
+    const frame = app.frame();
+    assert.match(frame, /last 3 answered/);
+    assert.match(frame, /WHEN\s+MODEL/, 'two columns, no more: when, and what took it');
+    assert.match(frame, /4s ago\s+groq\/llama/);
+    assert.match(frame, /2min ago\s+groq\/llama/);
+    assert.match(frame, /2h ago\s+groq\/llama/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the counters table follows this configuration, not the order the proxy sends', async () => {
+  // A background proxy still serving an older file numbers its chain from that
+  // file. Trusting that order puts the rows in one no other screen shows.
+  const models = [model('first', 'groq'), model('second', 'groq'), model('third', 'groq')];
+  const counters = (id, model) => ({
+    id,
+    provider: 'groq',
+    model,
+    requests: 1,
+    successes: 1,
+    failures: 0,
+    cancelled: 0,
+    tokens: 10,
+    lastUsedAt: Date.now(),
+    coolingDown: false,
+    cooldownMsLeft: 0,
+    lastError: null,
+  });
+  const stale = {
+    uptimeSec: 9,
+    statsSince: Date.UTC(2026, 7, 11, 8, 0),
+    totals: { requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30 },
+    // Reversed, renumbered, and carrying an entry this configuration never had.
+    chain: [
+      { ...counters('mdl_third', 'third'), priority: 1 },
+      { ...counters('mdl_gone', 'retired'), priority: 2 },
+      { ...counters('mdl_first', 'first'), priority: 3 },
+    ],
+  };
+  const app = await mount({ providers: [provider('groq')], models, view: { name: 'status', fetchStats: async () => stale } });
+  try {
+    const rows = app
+      .lines()
+      .map((line) => line.match(/\s(\d+)\s+groq\/(\S+)/))
+      .filter(Boolean)
+      .map(([, priority, target]) => `${priority} ${target}`);
+    assert.deepEqual(rows.slice(0, 3), ['1 first', '2 second', '3 third'], "the configuration's own priority order");
+    assert.match(app.frame(), /groq\/retired/, 'and what the proxy has but this configuration does not is kept, at the end');
   } finally {
     await app.close();
   }
@@ -762,7 +839,7 @@ test('the two shares are the last counters standing on a narrow screen', async (
   try {
     const frame = app.frame();
     assert.match(frame, /USE/);
-    assert.match(frame, /OK%/);
+    assert.match(frame, /UPTIME/);
     assert.doesNotMatch(frame, /TOKENS/, 'token totals are the first thing to go');
     assert.doesNotMatch(frame, /LAST ERROR/);
     // A percentage still reads with nothing to compare it against; a raw count

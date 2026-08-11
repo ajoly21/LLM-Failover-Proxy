@@ -10,7 +10,7 @@ import { c, log, setLogLevel } from "./logger.js";
 import { findAvailablePort } from "./net.js";
 import { failureFrames, listModels, run } from "./router.js";
 import { createGoneSignal } from "./signal.js";
-import { statsFile as currentStatsFile, enableStatsPersistence, snapshot, stateFor, statsSince } from "./state.js";
+import { statsFile as currentStatsFile, enableStatsPersistence, recentCalls, snapshot, stateFor, statsSince } from "./state.js";
 
 const MAX_BODY = 32 * 1024 * 1024;
 
@@ -144,6 +144,20 @@ function createSink(res, config) {
   };
 }
 
+/** The last answered requests, named: ids mean nothing to a reader. */
+function recentPayload(config) {
+  return recentCalls().map(({ id, at }) => {
+    const entry = config.models.find((model) => model.id === id);
+    return {
+      id,
+      at,
+      provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
+      model: entry?.model ?? null,
+      alias: entry?.alias ?? null,
+    };
+  });
+}
+
 function statsPayload(config) {
   const snap = snapshot();
   const now = Date.now();
@@ -153,6 +167,7 @@ function statsPayload(config) {
     // Counters are persisted, so they usually predate this process.
     statsSince: statsSince(),
     totals,
+    recent: recentPayload(config),
     providers: config.providers.map((p) => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, enabled: p.enabled })),
     chain: config.models.map((entry, index) => {
       const state = snap[entry.id] || stateFor(entry.id);
@@ -162,6 +177,9 @@ function statsPayload(config) {
       totals.cancelled += state.cancelled;
       totals.tokens += state.tokens;
       return {
+        // The id lets a reader line these counters up with its own configuration
+        // rather than trusting this order, which is only ours.
+        id: entry.id,
         priority: index + 1,
         alias: entry.alias,
         model: entry.model,
@@ -173,6 +191,7 @@ function statsPayload(config) {
         failures: state.failures,
         cancelled: state.cancelled,
         lastLatencyMs: state.lastLatencyMs,
+        lastUsedAt: state.lastUsedAt ?? null,
         tokens: state.tokens,
         coolingDown: state.cooldownUntil > now,
         cooldownMsLeft: Math.max(0, state.cooldownUntil - now),

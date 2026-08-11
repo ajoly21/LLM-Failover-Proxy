@@ -42,11 +42,15 @@ test("`stats` reports the counters of a running proxy, then exits", async () => 
 
     const live = await cli(["stats"], where);
     assert.match(live.stdout, /Running server/);
-    assert.match(live.stdout, /PRIO\s+TARGET\s+REQ\s+OK\s+KO\s+CX\s+USE\s+OK%\s+TOKENS/, "the counters table is printed");
+    assert.match(live.stdout, /PRIO\s+TARGET\s+REQ\s+OK\s+KO\s+CX\s+USE\s+UPTIME\s+TOKENS\s+LAST USED/, "the counters table is printed");
     assert.match(live.stdout, /p\/m-1/);
     assert.match(live.stdout, /1 request\(s\), 1 ok/);
     // The only model served everything and answered: both shares are total.
-    assert.match(live.stdout, /p\/m-1\s+1\s+1\s+0\s+0\s+100%\s+100%/, "share of the traffic, then share answered");
+    assert.match(live.stdout, /p\/m-1\s+1\s+1\s+0\s+0\s+100%\s+100%/, "share of the answers, then availability");
+    // And the call it just served is listed underneath, with its age.
+    assert.match(live.stdout, /last 1 answered/);
+    assert.match(live.stdout, /WHEN\s+MODEL/);
+    assert.match(live.stdout, /\ds ago\s+p\/m-1/, "seconds old, and which model took it");
     assert.doesNotMatch(live.stdout, /Providers|Model chain/, "just the counters, `status` is the full report");
 
     const asJson = JSON.parse((await cli(["stats", "--json"], where)).stdout);
@@ -81,10 +85,15 @@ test("a cancelled attempt is lost traffic, not unavailability", async () => {
       updatedAt: Date.now(),
       entries: {
         // Asked 8 times, served 3 answers, dropped 5 times for losing a race.
-        mdl_1: { requests: 8, successes: 3, failures: 0, cancelled: 5, tokens: 100 },
+        mdl_1: { requests: 8, successes: 3, failures: 0, cancelled: 5, tokens: 100, lastUsedAt: Date.now() - 23_000 },
         // Asked twice, answered once, failed once.
-        mdl_2: { requests: 2, successes: 1, failures: 1, cancelled: 0, tokens: 50 },
+        mdl_2: { requests: 2, successes: 1, failures: 1, cancelled: 0, tokens: 50, lastUsedAt: Date.now() - 125_000 },
       },
+      recent: [
+        { id: "mdl_1", at: Date.now() - 23_000 },
+        { id: "mdl_2", at: Date.now() - 125_000 },
+        { id: "mdl_gone", at: Date.now() - 3_600_000 },
+      ],
     }),
   );
 
@@ -95,8 +104,14 @@ test("a cancelled attempt is lost traffic, not unavailability", async () => {
     assert.match(stdout, /p\/hedged\s+8\s+3\s+0\s+5\s+75%\s+100%/);
     assert.match(stdout, /p\/flaky\s+2\s+1\s+1\s+0\s+25%\s+50%/, "1 of the 4 answers, and one failure out of two decided attempts");
 
+    // Ages, in the units the eye reads: seconds, then minutes.
+    assert.match(stdout, /23s ago\s+p\/hedged/);
+    assert.match(stdout, /2min ago\s+p\/flaky/);
+    assert.match(stdout, /1h ago\s+mdl_gone \(no longer configured\)/, "a deleted model is named, not silently dropped");
+
     const asJson = JSON.parse((await cli(["stats", "--json"], { configFile, cwd: dir })).stdout);
     assert.equal(asJson.totals.successes, 4, "the shares are taken out of the answers actually served");
+    assert.equal(asJson.recent.length, 3, "the recent calls travel in the JSON too");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

@@ -6,6 +6,17 @@ import { log } from "./logger.js";
 /** Per-model-entry runtime state: counters plus circuit breaker. */
 const runtime = new Map();
 
+/**
+ * The last answered requests, newest first: `{ id, at }`.
+ *
+ * Counters say how much a model has served; this says whether anything is
+ * happening right now, and which model took it. Kept a little longer than any
+ * screen shows, so a screen can ask for five and still have five after one is
+ * deleted from the configuration.
+ */
+const RECENT_LIMIT = 12;
+let recent = [];
+
 const FILE_VERSION = 1;
 
 let persistFile = null;
@@ -53,7 +64,6 @@ export function cooldownRemaining(id, now = Date.now()) {
 export function recordStart(id) {
   const state = stateFor(id);
   state.requests += 1;
-  state.lastUsedAt = Date.now();
 }
 
 export function recordSuccess(id, { latencyMs = null, tokens = 0 } = {}) {
@@ -64,8 +74,19 @@ export function recordSuccess(id, { latencyMs = null, tokens = 0 } = {}) {
   state.cooldownReason = null;
   state.lastError = null;
   state.lastLatencyMs = latencyMs;
+  // Stamped on the answer, not on the attempt: a model that was asked and then
+  // dropped for losing a race was never used, and saying "used 3s ago" about it
+  // would be the wrong answer to "is this model pulling its weight".
+  state.lastUsedAt = Date.now();
   state.tokens += tokens || 0;
+  recent.unshift({ id, at: state.lastUsedAt });
+  if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT;
   flushStats();
+}
+
+/** The last answered requests, newest first. */
+export function recentCalls(limit = RECENT_LIMIT) {
+  return recent.slice(0, Math.max(0, limit));
 }
 
 /**
@@ -115,6 +136,49 @@ export function snapshot() {
 /** Timestamp the current counters started accumulating from. */
 export function statsSince() {
   return since;
+}
+
+/** A row of counters for an entry nothing has been recorded against yet. */
+const NO_COUNTERS = {
+  requests: 0,
+  successes: 0,
+  failures: 0,
+  cancelled: 0,
+  tokens: 0,
+  lastLatencyMs: null,
+  lastUsedAt: null,
+  coolingDown: false,
+  cooldownMsLeft: 0,
+  lastError: null,
+};
+
+/**
+ * Puts a `/stats` chain in the order of `config.models`, which is the priority
+ * order every other screen shows.
+ *
+ * The counters come from whichever proxy answers on the port, and it numbers them
+ * from *its* configuration: a background instance still serving an older file, or
+ * a different file altogether, reports an order of its own. Matching by id — then
+ * by provider and model, for a proxy too old to send one — makes the numbering
+ * this reader's own. Entries the answering proxy has and this configuration does
+ * not are kept at the end rather than hidden.
+ */
+export function alignChain(models, chain, providerName) {
+  const rows = Array.isArray(chain) ? chain : [];
+  const byId = new Map(rows.filter((row) => row.id).map((row) => [row.id, row]));
+  const target = (provider, model) => `${provider}/${model}`.toLowerCase();
+  const byTarget = new Map(rows.map((row) => [target(row.provider, row.model), row]));
+
+  const taken = new Set();
+  const aligned = models.map((entry, index) => {
+    const provider = providerName(entry.providerId);
+    const found = byId.get(entry.id) ?? byTarget.get(target(provider, entry.model));
+    if (found) taken.add(found);
+    return { ...NO_COUNTERS, ...found, id: entry.id, priority: index + 1, provider, model: entry.model, alias: entry.alias, kind: entry.kind };
+  });
+
+  const extra = rows.filter((row) => !taken.has(row));
+  return [...aligned, ...extra.map((row, index) => ({ ...row, priority: aligned.length + index + 1 }))];
 }
 
 export function statsFile() {
@@ -171,6 +235,16 @@ function restoreFrom(file, knownIds) {
     runtime.set(id, sanitize(saved));
     restored += 1;
   }
+
+  // Same treatment as the counters: user-editable, possibly stale, and entries
+  // for models that no longer exist are of no use to anyone.
+  if (Array.isArray(raw.recent)) {
+    recent = raw.recent
+      .filter((call) => call && typeof call.id === "string" && Number.isFinite(Number(call.at)))
+      .filter((call) => !knownIds || knownIds.has(call.id))
+      .slice(0, RECENT_LIMIT)
+      .map((call) => ({ id: call.id, at: Number(call.at) }));
+  }
   log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ""}`);
 }
 
@@ -216,6 +290,7 @@ export function flushStats() {
     since,
     updatedAt: Date.now(),
     entries: Object.fromEntries(runtime),
+    recent,
   };
   try {
     fs.mkdirSync(path.dirname(persistFile), { recursive: true });
@@ -234,6 +309,7 @@ export function flushStats() {
 /** Drops everything, including the file binding (used by tests). */
 export function resetAll() {
   runtime.clear();
+  recent = [];
   persistFile = null;
   writeFailureLogged = false;
   since = Date.now();

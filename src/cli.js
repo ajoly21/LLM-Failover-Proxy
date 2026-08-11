@@ -3,9 +3,10 @@ import { configExists, configPath, describeKey, inlineKeys, loadConfig, provider
 import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
-import { c, compact, ESC, ms, percent } from "./logger.js";
+import { c, compact, ESC, ago, percent } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
+import { alignChain } from "./state.js";
 
 /* ------------------------------------------------------------------ *
  * Plain-text report, used by `status`, which must stay pipeable      *
@@ -126,7 +127,10 @@ async function liveStats(config) {
       signal: AbortSignal.timeout(1500),
     });
     if (!response.ok) return null;
-    return { ...(await response.json()), source: "server" };
+    const payload = await response.json();
+    // The answering proxy numbers the chain from its own configuration; this one
+    // has to read in the order of ours, the same as every other screen.
+    return { ...payload, chain: alignChain(config.models, payload.chain, (id) => providerLabel(config, id)), source: "server" };
   } catch {
     return null;
   }
@@ -160,16 +164,33 @@ function statsFromDisk(config) {
       cancelled: num(state.cancelled),
       tokens: num(state.tokens),
       lastLatencyMs: state.lastLatencyMs ?? null,
+      lastUsedAt: num(state.lastUsedAt) || null,
       coolingDown: num(state.cooldownUntil) > now,
       cooldownMsLeft: Math.max(0, num(state.cooldownUntil) - now),
       lastError: state.lastError ?? null,
     };
   });
 
+  // Same shape the server publishes, so one renderer serves both sources.
+  const named = new Map(config.models.map((entry) => [entry.id, entry]));
+  const recent = (Array.isArray(raw?.recent) ? raw.recent : [])
+    .filter((call) => call && typeof call.id === "string" && num(call.at) > 0)
+    .map((call) => {
+      const entry = named.get(call.id);
+      return {
+        id: call.id,
+        at: num(call.at),
+        provider: entry ? providerLabel(config, entry.providerId) : null,
+        model: entry?.model ?? null,
+        alias: entry?.alias ?? null,
+      };
+    });
+
   const total = (key) => chain.reduce((sum, row) => sum + row[key], 0);
   return {
     source: "file",
     file,
+    recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
     updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt : null,
     totals: {
@@ -197,27 +218,45 @@ function printStats(stats) {
     ),
   );
   table(
-    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "USE", "OK%", "TOKENS", "LAST LATENCY", "LAST ERROR"],
-    // Sorted here rather than trusted: the answering proxy may be a background
-    // instance of another version, and the priority column has to read in order.
-    [...stats.chain]
-      .sort((a, b) => a.priority - b.priority)
-      .map((row) => [
-        row.priority,
-        `${row.provider}/${row.model}`,
-        compact(row.requests),
-        c.green(compact(row.successes)),
-        row.failures ? c.red(compact(row.failures)) : "0",
-        row.cancelled ? c.yellow(compact(row.cancelled)) : "0",
-        // Share of the answers served, then how often it answered when it was
-        // asked to finish. Both ignore dropped races: one served nothing, and
-        // losing a race is not unavailability.
-        percent(row.successes, stats.totals.successes),
-        percent(row.successes, row.successes + row.failures),
-        compact(row.tokens),
-        ms(row.lastLatencyMs),
-        row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
-      ]),
+    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "USE", "UPTIME", "TOKENS", "LAST USED", "LAST ERROR"],
+    // Already in the configuration's order, from whichever source produced it.
+    stats.chain.map((row) => [
+      row.priority,
+      `${row.provider}/${row.model}`,
+      compact(row.requests),
+      c.green(compact(row.successes)),
+      row.failures ? c.red(compact(row.failures)) : "0",
+      row.cancelled ? c.yellow(compact(row.cancelled)) : "0",
+      // Share of the answers served, then availability: how often it answered
+      // when it was allowed to finish. Both ignore dropped races — one served
+      // nothing, and losing a race is not being down.
+      percent(row.successes, stats.totals.successes),
+      percent(row.successes, row.successes + row.failures),
+      compact(row.tokens),
+      ago(row.lastUsedAt),
+      row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
+    ]),
+  );
+
+  printRecent(stats.recent);
+}
+
+/** Rows shown of the last answered requests. */
+const RECENT_ROWS = 5;
+
+/**
+ * The last answered requests. The counters say how much each model has served
+ * over the whole history; this says what is happening now, and which model took
+ * it — the question the totals cannot answer.
+ */
+function printRecent(recent, limit = RECENT_ROWS) {
+  const calls = (Array.isArray(recent) ? recent : []).slice(0, limit);
+  if (!calls.length) return;
+  say("");
+  say(`  ${c.gray(`last ${calls.length} answered`)}`);
+  table(
+    ["WHEN", "MODEL"],
+    calls.map((call) => [ago(call.at), call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`)]),
   );
 }
 

@@ -2,20 +2,33 @@ import { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { h } from '../h.js';
 import { useLayout } from '../size.js';
-import { COLOR, SYMBOL, compact, duration, percent } from '../theme.js';
+import { COLOR, SYMBOL, ago, compact, percent } from '../theme.js';
 import { Frame, Hints, Table } from '../widgets.js';
 import { resolveChain } from '../../router.js';
 import { providerLabel, resolveSecret } from '../../config.js';
 import { daemonStatus } from '../../daemon.js';
+import { alignChain } from '../../state.js';
 
 const POLL_MS = 2000;
 
+/** Answered requests listed under the counters, and fewer on a short screen. */
+const RECENT_ROWS = 5;
+
 /**
- * The failover list and the counters table hold the same entries in the same
- * order, so on anything but a tall terminal the list is cut to a preview and the
- * table — which carries the numbers too — is the one that gets the rows.
+ * What the counters cannot say: whether anything is being served right now, and
+ * by which model. Two columns on purpose — when, and what — because a third
+ * would push the model name off a narrow screen.
  */
-const CHAIN_PREVIEW = 3;
+const RECENT_COLUMNS = [
+  { key: 'at', label: 'WHEN', align: 'right', width: 9, text: (row) => ago(row.at) },
+  {
+    key: 'target',
+    label: 'MODEL',
+    flex: true,
+    min: 14,
+    text: (row) => (row.model ? `${row.provider}/${row.model}` : `${row.id} (no longer configured)`),
+  },
+];
 
 /** Live view of a running proxy: persisted counters, cooldowns, last errors. */
 export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs = POLL_MS }) {
@@ -49,8 +62,10 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
   }, [config.server.host, config.server.port, config.server.apiKey, fetchStats, pollMs]);
 
   const layout = useLayout();
-  const chain = resolveChain(config, 'auto', 'chat');
+  const usable = resolveChain(config, 'auto', 'chat').entries.length > 0;
   const address = `${config.server.host}:${config.server.port}`;
+  const recentRows = layout.short ? 3 : RECENT_ROWS;
+  const recent = (Array.isArray(stats?.recent) ? stats.recent : []).slice(0, recentRows);
 
   // The name shortens first; then the widest numbers go, cheapest first.
   const columns = [
@@ -89,17 +104,19 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
       text: (row) => percent(row.successes, stats?.totals?.successes),
     },
     {
-      key: 'reliability',
-      label: 'OK%',
+      key: 'uptime',
+      label: 'UPTIME',
       align: 'right',
-      width: 5,
-      // Of the attempts that were carried to an answer. Cancelled ones lost a
-      // race, they say nothing about whether the model was available.
+      width: 6,
+      // Availability: of the attempts it was allowed to finish, how many it
+      // answered. Cancelled ones lost a race and say nothing about being up.
       text: (row) => percent(row.successes, row.successes + row.failures),
       color: (row) => reliabilityColor(row),
     },
     { key: 'tokens', label: 'TOKENS', align: 'right', width: 6, drop: 6, text: (row) => compact(row.tokens) },
-    { key: 'lastLatencyMs', label: 'LAST', align: 'right', width: 7, drop: 4, text: (row) => duration(row.lastLatencyMs) },
+    // When it last answered, not how fast: on a chain this long the useful
+    // question is which models are still being reached at all.
+    { key: 'lastUsedAt', label: 'LAST USED', align: 'right', width: 9, drop: 4, text: (row) => ago(row.lastUsedAt) },
     {
       key: 'lastError',
       label: 'LAST ERROR',
@@ -109,14 +126,6 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
       color: (row) => (row.lastError ? COLOR.fail : undefined),
     },
   ];
-
-  // Room for the whole list only on a tall terminal; the counters table repeats
-  // it in the same order, so cutting it here costs nothing.
-  const room = layout.short ? CHAIN_PREVIEW : layout.listRows(20);
-  const preview =
-    chain.entries.length > room
-      ? { entries: chain.entries.slice(0, room), hidden: chain.entries.length - room }
-      : { entries: chain.entries, hidden: 0 };
 
   return h(
     Frame,
@@ -130,22 +139,7 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
         ],
       }),
     },
-    h(
-      Box,
-      { flexDirection: 'column', paddingTop: 1 },
-      h(Text, { dimColor: true, wrap: 'truncate' }, `  failover order for model="auto"${preview.hidden ? ` · ${preview.hidden} more in the table` : ''}`),
-      ...(chain.entries.length
-        ? preview.entries.map((entry, index) =>
-            h(
-              Text,
-              { key: entry.id, wrap: 'truncate' },
-              `  ${String(index + 1).padStart(3)}. `,
-              h(Text, { color: COLOR.accent }, providerLabel(config, entry.providerId)),
-              h(Text, { dimColor: true }, `/${entry.model}`),
-            ),
-          )
-        : [h(Text, { key: 'none', color: COLOR.warn }, '  no usable model')]),
-    ),
+    usable ? null : h(Box, { paddingTop: 1 }, h(Text, { color: COLOR.warn }, '  no usable model: check the providers screen')),
     stats
       ? h(
           Box,
@@ -166,13 +160,25 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
             h(Text, { color: stats.totals.cancelled ? COLOR.warn : undefined }, `${compact(stats.totals.cancelled)} cancelled`),
             h(Text, { dimColor: true }, ` · ${compact(stats.totals.tokens)} tokens`),
           ),
-          // Reserved: frame, title, hints, the chain list, the totals line, the
-          // gaps — and the subtitle's own line once the terminal is narrow.
+          // Reserved: frame, title, hints, the totals line, the gaps, the block
+          // of recent calls — and the subtitle's own line once it is narrow.
           h(
             Box,
             { paddingTop: 1 },
-            h(Table, { columns, rows: byPriority(stats.chain), maxRows: layout.listRows(12 + preview.entries.length + (layout.narrow ? 1 : 0)) }),
+            h(Table, {
+              columns,
+              rows: alignChain(config.models, stats.chain, (providerId) => providerLabel(config, providerId)),
+              maxRows: layout.listRows(12 + recentRows + (layout.narrow ? 1 : 0)),
+            }),
           ),
+          recent.length
+            ? h(
+                Box,
+                { flexDirection: 'column', paddingTop: 1 },
+                h(Text, { dimColor: true }, `  last ${recent.length} answered`),
+                h(Table, { columns: RECENT_COLUMNS, rows: recent, maxRows: recentRows }),
+              )
+            : null,
         )
       : h(
           Box,
@@ -190,13 +196,6 @@ function reliabilityColor(row) {
   if (!row.failures) return COLOR.ok;
   return row.successes / decided < 0.5 ? COLOR.fail : COLOR.warn;
 }
-
-/**
- * The counters come from whichever proxy answers, which may be a background
- * instance of another version. Sorting here rather than trusting the payload
- * keeps this table in the same order as the failover list above it.
- */
-const byPriority = (chain) => [...chain].sort((a, b) => a.priority - b.priority).map((row, index) => ({ ...row, key: index }));
 
 async function defaultFetch(config) {
   // A background instance may sit on another port than the configured one.
