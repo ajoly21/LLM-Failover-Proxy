@@ -73,13 +73,16 @@ export function whichSync(name, { pathValue = process.env.PATH, pathExt = proces
       } catch {
         continue;
       }
-      // PATHEXT is usually upper-case while the file on disk is not, and a path
-      // printed in the wrong case does not match what `where` reports. Only on
-      // Windows: on POSIX these entries are symlinks into the package, and
-      // resolving them would name the target instead of the command.
+      // PATHEXT is upper-case while the file on disk is not, and a path printed
+      // in the wrong case does not match what `where` reports. Only the file name
+      // is corrected: resolving the whole path would rewrite the directory too,
+      // and a PATH entry reached by its 8.3 short name has to stay the one the
+      // user actually has. On POSIX there is nothing to correct.
       if (!isWindows(platform)) return candidate;
       try {
-        return fs.realpathSync.native(candidate);
+        const wanted = path.basename(candidate).toLowerCase();
+        const real = fs.readdirSync(dir).find((entry) => entry.toLowerCase() === wanted);
+        return real ? path.join(dir, real) : candidate;
       } catch {
         return candidate;
       }

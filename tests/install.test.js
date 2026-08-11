@@ -23,7 +23,7 @@ test("on Windows, the lookup reports the file the shell can actually run", async
   const elsewhere = await temp();
   try {
     const windows = { pathValue: [elsewhere, dir].join(";"), platform: "win32", pathExt: ".COM;.EXE;.BAT;.CMD" };
-    assert.equal(whichSync("llmfp", windows), path.join(dir, "llmfp.cmd"), "cmd.exe will not execute the extensionless shim");
+    assert.equal(whichSync("llmfp", windows), path.join(dir, "llmfp.CMD"), "cmd.exe will not execute the extensionless shim");
     assert.equal(whichSync("nothing-like-this", windows), null);
 
     // Only the sh shim: still worth reporting rather than claiming nothing is there.
@@ -38,6 +38,20 @@ test("on Windows, the lookup reports the file the shell can actually run", async
     await fs.rm(trap, { recursive: true, force: true });
   } finally {
     for (const target of [dir, elsewhere]) await fs.rm(target, { recursive: true, force: true });
+  }
+});
+
+// npm writes `llmfp.cmd`, PATHEXT says `.CMD`, and only Windows calls those the
+// same file — so the spelling this reports can only be checked there.
+test("the reported name is the one on disk, not the one PATHEXT spells", { skip: process.platform === "win32" ? false : "case-insensitive filesystem" }, async () => {
+  const dir = await fakeBinDir(["llmfp", "llmfp.cmd"]);
+  try {
+    const found = whichSync("llmfp", { pathValue: dir, platform: "win32", pathExt: ".COM;.EXE;.BAT;.CMD" });
+    assert.equal(found, path.join(dir, "llmfp.cmd"), "`where llmfp` prints it lower-case, and so must this");
+    // The directory is left exactly as PATH gave it: a short-name entry stays short.
+    assert.equal(path.dirname(found), dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -102,7 +116,7 @@ test("a command resolving to another installation is reported, not called ok", a
       pathValue: [other, installed].join(";"),
     });
     assert.equal(status.dir, installed);
-    assert.equal(status.resolved, path.join(other, "llmfp.cmd"));
+    assert.equal(status.resolved, path.join(other, "llmfp.CMD"));
     assert.equal(status.onPath, true);
     assert.equal(status.shadowed, true, "it answers, but it is not the copy npm just linked");
   } finally {

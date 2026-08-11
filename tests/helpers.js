@@ -63,8 +63,13 @@ export async function startProxy({ providers = [], models = [], failover = {}, s
  * as the whole PATH. Otherwise the test passes on a machine that happens to have
  * `llmfp` installed and fails on a CI runner, which is the exact confusion the
  * PATH check exists to clear up.
+ *
+ * `.CMD` upper-case on purpose: PATHEXT is upper-case, so a lower-case name on
+ * disk only resolves where the filesystem ignores case. This way the Windows
+ * lookup can be exercised from a Linux runner too — the real-world lower-case
+ * spelling has its own test, on Windows.
  */
-export async function fakeBinDir(names = ['llmfp', 'llmfp.cmd', 'llmfp.ps1']) {
+export async function fakeBinDir(names = ['llmfp', 'llmfp.CMD', 'llmfp.ps1']) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-bin-'));
   for (const name of names) await fs.writeFile(path.join(dir, name), '#!/bin/sh\n', { mode: 0o755 });
   return dir;
