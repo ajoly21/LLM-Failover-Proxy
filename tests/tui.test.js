@@ -744,9 +744,9 @@ test('the last answered requests are listed under the counters, with their age',
     totals: { requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30 },
     chain: [{ id: 'mdl_llama', priority: 1, provider: 'groq', model: 'llama', requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30, lastUsedAt: now - 4000 }],
     recent: [
-      { id: 'mdl_llama', at: now - 4000, provider: 'groq', model: 'llama', alias: 'llama' },
-      { id: 'mdl_llama', at: now - 90_000, provider: 'groq', model: 'llama', alias: 'llama' },
-      { id: 'mdl_llama', at: now - 7_200_000, provider: 'groq', model: 'llama', alias: 'llama' },
+      { id: 'mdl_llama', at: now - 4000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 437 },
+      { id: 'mdl_llama', at: now - 90_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 8200 },
+      { id: 'mdl_llama', at: now - 7_200_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: null },
     ],
   };
   const app = await mount({
@@ -757,12 +757,32 @@ test('the last answered requests are listed under the counters, with their age',
   try {
     const frame = app.frame();
     assert.match(frame, /last 3 answered/);
-    assert.match(frame, /WHEN\s+MODEL/, 'two columns, no more: when, and what took it');
-    assert.match(frame, /4s ago\s+groq\/llama/);
-    assert.match(frame, /2min ago\s+groq\/llama/);
-    assert.match(frame, /2h ago\s+groq\/llama/);
+    assert.match(frame, /WHEN\s+MODEL\s+TTFT/, 'when, what took it, and how long the wait was');
+    assert.match(frame, /4s ago\s+groq\/llama\s+437ms/);
+    assert.match(frame, /2min ago\s+groq\/llama\s+8\.20s/, 'the slow one is the whole point of listing calls one by one');
+    assert.match(frame, /2h ago\s+groq\/llama\s+-/, 'a call recorded before this was measured says so');
   } finally {
     await app.close();
+  }
+
+  // On a screen too narrow for three, TTFT goes and the model name stays: a row
+  // with no model in it says nothing at all. Columns are sized to their content,
+  // so three of them fit further down than one would guess — this is genuinely
+  // the width at which one has to go, with a name as short as `groq/llama`.
+  const narrow = await mount({
+    providers: [provider('groq')],
+    models: [model('llama', 'groq')],
+    view: { name: 'status', fetchStats: async () => stats },
+    columns: 32,
+    rows: 30,
+  });
+  try {
+    const frame = narrow.frame();
+    assert.match(frame, /last 3 answered/);
+    assert.doesNotMatch(frame, /TTFT/, 'dropped rather than truncated into nonsense');
+    assert.match(frame, /4s ago\s+groq\/llama/, 'and the row still answers "which model"');
+  } finally {
+    await narrow.close();
   }
 });
 

@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 import { statsPathFor } from "../src/config.js";
 import { flushStats } from "../src/state.js";
-import { assemble, backend, postJson, startProxy } from "./helpers.js";
+import { assemble, backend, postJson, readStream, startProxy } from "./helpers.js";
 import { startMock } from "./mock-provider.js";
 
 const CHAT = { messages: [{ role: "user", content: "hi" }] };
@@ -50,6 +50,36 @@ test("counters survive a restart", async () => {
   } finally {
     await fs.rm(first.dir, { recursive: true, force: true });
     await Promise.all(mocks.map((mock) => mock.close()));
+  }
+});
+
+test("each answered request records how long its first token took", async () => {
+  // A provider that says nothing for 300ms and then streams. TTFT is the only
+  // number that describes what that felt like: the total latency is the whole
+  // answer, and an average over the chain would bury it.
+  const slow = await startMock("ok", { name: "slow", delayMs: 300 });
+  const proxy = await startProxy(assemble([backend(slow, { model: "m-1", alias: "a" })]));
+  try {
+    await readStream(`${proxy.url}/v1/chat/completions`, { ...CHAT, stream: true });
+    const streamed = (await getStats(proxy)).recent[0];
+    assert.equal(streamed.model, "m-1");
+    assert.ok(streamed.ttftMs >= 250, `a 300ms wait cannot be reported as ${streamed.ttftMs}ms`);
+    assert.ok(streamed.ttftMs < 10000, "and it is a duration, not a timestamp");
+
+    // Not streamed: the answer arrives whole, so its first token is its latency.
+    // It must still be a number — an empty column would look like a bug.
+    await postJson(`${proxy.url}/v1/chat/completions`, CHAT);
+    const whole = (await getStats(proxy)).recent[0];
+    assert.ok(whole.ttftMs >= 250, `expected the request's own latency, got ${whole.ttftMs}`);
+
+    // And it survives the trip through the stats file, like every other counter.
+    flushStats();
+    const onDisk = await statsOf(proxy.file);
+    assert.ok(onDisk.recent[0].ttftMs >= 250, "written as measured, not dropped on the way out");
+  } finally {
+    await proxy.stop();
+    await fs.rm(proxy.dir, { recursive: true, force: true });
+    await slow.close();
   }
 });
 

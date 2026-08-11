@@ -5,7 +5,7 @@ import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } fr
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
 import { checkForUpdate, updateCommand, updateCommandLine } from "./update.js";
-import { c, compact, ESC, ago, percent } from "./logger.js";
+import { c, compact, ESC, ago, ms, percent } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
@@ -182,6 +182,7 @@ function statsFromDisk(config) {
       return {
         id: call.id,
         at: num(call.at),
+        ttftMs: call.ttftMs == null ? null : num(call.ttftMs),
         provider: entry ? providerLabel(config, entry.providerId) : null,
         model: entry?.model ?? null,
         alias: entry?.alias ?? null,
@@ -248,8 +249,9 @@ const RECENT_ROWS = 5;
 
 /**
  * The last answered requests. The counters say how much each model has served
- * over the whole history; this says what is happening now, and which model took
- * it — the question the totals cannot answer.
+ * over the whole history; this says what is happening now, which model took it,
+ * and how long the wait was — the questions the totals cannot answer, since an
+ * average hides the one call that took eight seconds.
  */
 function printRecent(recent, limit = RECENT_ROWS) {
   const calls = (Array.isArray(recent) ? recent : []).slice(0, limit);
@@ -257,8 +259,13 @@ function printRecent(recent, limit = RECENT_ROWS) {
   say("");
   say(`  ${c.gray(`last ${calls.length} answered`)}`);
   table(
-    ["WHEN", "MODEL"],
-    calls.map((call) => [ago(call.at), call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`)]),
+    ["WHEN", "MODEL", "TTFT"],
+    calls.map((call) => [
+      ago(call.at),
+      call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`),
+      // A non-streamed answer arrives whole: its first token is its whole latency.
+      ms(call.ttftMs),
+    ]),
   );
 }
 

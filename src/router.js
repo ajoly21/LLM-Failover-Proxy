@@ -198,6 +198,7 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
 
   const buffered = [];
   let committed = false;
+  let committedAt = null;
   let lastUsage = null;
   let done = false;
 
@@ -212,6 +213,9 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
     if (committed) return true;
     if (!claim()) return false;
     committed = true;
+    // The first chunk carrying content: this, and nothing else, is the moment the
+    // wait ends for whoever is reading the answer.
+    committedAt = Date.now();
     sink.commit(meta());
     for (const text of buffered) sink.write(text);
     buffered.length = 0;
@@ -280,7 +284,7 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
     }
     sink.write(SSE_DONE);
     sink.end();
-    return { kind: "win", usage: lastUsage };
+    return { kind: "win", usage: lastUsage, committedAt };
   } catch (err) {
     if (err?.name === "ClientGoneError") throw err; // client cancelled: not the provider's fault
     if (err?.name === "RaceLost" || controller.signal.reason?.name === "RaceLost") return { kind: "cancelled" };
@@ -300,7 +304,7 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
       );
       sink.write(SSE_DONE);
       sink.end();
-      return { kind: "win", usage: lastUsage, degraded: true, error: info };
+      return { kind: "win", usage: lastUsage, degraded: true, error: info, committedAt };
     }
     throw err;
   } finally {
@@ -624,7 +628,10 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
         });
         log.warn(`[${requestId}] ${c.yellow("degraded stream")} ${target} after ${ms(latency)}: ${outcome.error.message}`);
       } else {
-        recordSuccess(task.entry.id, { latencyMs: latency, tokens: tokensOf(outcome.usage) });
+        // A non-streamed answer has no first token of its own: the whole body
+        // arrives at once, so the wait that ended is the request's own latency.
+        const ttft = outcome.committedAt ? outcome.committedAt - task.startedAt : latency;
+        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage) });
         log.info(
           `[${requestId}] ${c.green("ok")} ${target} (${place}${streaming ? ", stream" : ""}) ${ms(latency)}` +
             `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ""}` +

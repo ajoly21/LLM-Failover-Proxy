@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { h } from '../h.js';
 import { useLayout } from '../size.js';
-import { COLOR, SYMBOL, ago, compact, percent } from '../theme.js';
+import { COLOR, SYMBOL, ago, compact, duration, percent } from '../theme.js';
 import { Frame, Hints, Table } from '../widgets.js';
 import { resolveChain } from '../../router.js';
 import { providerLabel, resolveSecret } from '../../config.js';
@@ -15,9 +15,13 @@ const POLL_MS = 2000;
 const RECENT_ROWS = 5;
 
 /**
- * What the counters cannot say: whether anything is being served right now, and
- * by which model. Two columns on purpose — when, and what — because a third
- * would push the model name off a narrow screen.
+ * What the counters cannot say: whether anything is being served right now, by
+ * which model, and how long the wait was before the answer started coming.
+ *
+ * An average would hide the one call that took eight seconds, which is the only
+ * one anybody wants to know about — so these are individual calls, newest first.
+ * TTFT is the first to go when the screen cannot hold three columns: the model
+ * name is what makes a row mean anything at all.
  */
 const RECENT_COLUMNS = [
   { key: 'at', label: 'WHEN', align: 'right', width: 9, text: (row) => ago(row.at) },
@@ -28,6 +32,8 @@ const RECENT_COLUMNS = [
     min: 14,
     text: (row) => (row.model ? `${row.provider}/${row.model}` : `${row.id} (no longer configured)`),
   },
+  // A non-streamed answer arrives whole, so its first token is its whole latency.
+  { key: 'ttft', label: 'TTFT', align: 'right', width: 8, drop: 1, text: (row) => duration(row.ttftMs) },
 ];
 
 /** Live view of a running proxy: persisted counters, cooldowns, last errors. */

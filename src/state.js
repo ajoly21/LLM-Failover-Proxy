@@ -66,7 +66,7 @@ export function recordStart(id) {
   state.requests += 1;
 }
 
-export function recordSuccess(id, { latencyMs = null, tokens = 0 } = {}) {
+export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0 } = {}) {
   const state = stateFor(id);
   state.successes += 1;
   state.consecutiveFailures = 0;
@@ -79,7 +79,9 @@ export function recordSuccess(id, { latencyMs = null, tokens = 0 } = {}) {
   // would be the wrong answer to "is this model pulling its weight".
   state.lastUsedAt = Date.now();
   state.tokens += tokens || 0;
-  recent.unshift({ id, at: state.lastUsedAt });
+  // Kept per call rather than per model: the point of the list is what the last
+  // few requests felt like, and an average hides exactly the one that was slow.
+  recent.unshift({ id, at: state.lastUsedAt, ttftMs: nullableNum(ttftMs) });
   if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT;
   flushStats();
 }
@@ -243,15 +245,17 @@ function restoreFrom(file, knownIds) {
       .filter((call) => call && typeof call.id === "string" && Number.isFinite(Number(call.at)))
       .filter((call) => !knownIds || knownIds.has(call.id))
       .slice(0, RECENT_LIMIT)
-      .map((call) => ({ id: call.id, at: Number(call.at) }));
+      .map((call) => ({ id: call.id, at: Number(call.at), ttftMs: nullableNum(call.ttftMs) }));
   }
   log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ""}`);
 }
 
+const num = (value, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+/** A measurement that may legitimately be missing stays missing, never becomes 0. */
+const nullableNum = (value) => (value == null ? null : num(value));
+
 /** A stats file is user-editable and may be stale: never trust its shape. */
 function sanitize(saved) {
-  const num = (value, fallback = 0) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
-  const nullableNum = (value) => (value == null ? null : num(value));
   const state = blank();
 
   state.consecutiveFailures = Math.max(0, num(saved?.consecutiveFailures));
