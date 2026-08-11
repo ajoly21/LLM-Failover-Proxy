@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { fakeBinDir } from "./helpers.js";
 
 const run = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -112,8 +113,11 @@ test("with no terminal, the bundled UI reports instead of opening menus", option
 });
 
 test("the bundled install check runs from the tarball, and can fail", options, async () => {
+  // The command has to be findable for the healthy case, and unfindable for the
+  // other: both are supplied here rather than left to the machine.
+  const bin = await fakeBinDir();
   await withConfig(async (file) => {
-    const { stdout } = await run(process.execPath, [BUNDLE, "doctor", "--config", file], { env, cwd: path.dirname(file) });
+    const { stdout } = await run(process.execPath, [BUNDLE, "doctor", "--config", file], { env: { ...env, PATH: bin }, cwd: path.dirname(file) });
     assert.match(stdout, /command\s+/, "the PATH check is what the installer calls");
     assert.match(stdout, /node\s+/);
 
@@ -127,6 +131,7 @@ test("the bundled install check runs from the tarball, and can fail", options, a
       },
     );
   });
+  await fs.rm(bin, { recursive: true, force: true });
 });
 
 test("the bundled UI mounts and renders its home screen", options, async () => {

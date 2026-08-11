@@ -6,18 +6,12 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { commandStatus, fallbackCommand, globalBinCandidates, installScope, nodeManager, pathAdvice, whichSync } from "../src/install.js";
+import { fakeBinDir } from "./helpers.js";
 
 const run = promisify(execFile);
 const CLI = path.resolve(import.meta.dirname, "..", "src", "index.js");
 
 const temp = async () => fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-install-"));
-
-/** A bin directory as npm would leave it: the shim, plus the Windows wrappers. */
-async function fakeBinDir(names = ["llmfp", "llmfp.cmd", "llmfp.ps1"]) {
-  const dir = await temp();
-  for (const name of names) await fs.writeFile(path.join(dir, name), "#!/bin/sh\n", { mode: 0o755 });
-  return dir;
-}
 
 /**
  * Windows semantics run on any host: `;` cannot collide with the drive letter of
@@ -189,20 +183,22 @@ function cli(args, { configFile, cwd, pathValue } = {}) {
 test("`doctor` reports a usable install and hands the shell back", async () => {
   const dir = await temp();
   const configFile = path.join(dir, "config.json");
+  // A PATH that holds the command, whether or not this machine has it installed.
+  const bin = await fakeBinDir();
   try {
-    const { stdout } = await cli(["doctor"], { configFile, cwd: dir });
+    const { stdout } = await cli(["doctor"], { configFile, cwd: dir, pathValue: bin });
     assert.match(stdout, /command\s+llmfp/, "the command the user types is the first thing checked");
     assert.match(stdout, /node\s+\S/);
     assert.match(stdout, /config\s+\S/);
     assert.match(stdout, /not written yet/, "a fresh machine has no configuration file, and says so");
 
-    const report = JSON.parse((await cli(["doctor", "--json"], { configFile, cwd: dir })).stdout);
+    const report = JSON.parse((await cli(["doctor", "--json"], { configFile, cwd: dir, pathValue: bin })).stdout);
     assert.equal(report.configFile, configFile);
     assert.equal(report.configExists, false);
-    assert.equal(typeof report.command.onPath, "boolean");
+    assert.equal(report.command.onPath, true);
     assert.ok(report.fallback.includes(process.execPath), "a script always gets a command that needs no PATH");
   } finally {
-    await fs.rm(dir, { recursive: true, force: true });
+    for (const target of [dir, bin]) await fs.rm(target, { recursive: true, force: true });
   }
 });
 
