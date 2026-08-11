@@ -75,7 +75,7 @@ test("nothing machine-specific can leave this machine", async () => {
   // Two ways out of here, git and npm, and neither may carry the local
   // configuration, the keys, or the counters of whoever built the package.
   const ignored = (await fs.readFile(path.join(ROOT, ".gitignore"), "utf8")).split(/\r?\n/).map((line) => line.trim());
-  for (const pattern of [".env", ".env.*", "*.stats.json", "config.json", "llm-proxy.config.json", "daemon.json", "daemon.log", "service/", "dist/", "node_modules/"]) {
+  for (const pattern of [".env", ".env.*", "*.stats.json", "config.json", "llm-proxy.config.json", "daemon.json", "daemon.log", "update.json", "service/", "dist/", "node_modules/"]) {
     assert.ok(ignored.includes(pattern), `.gitignore must keep ${pattern} out of git`);
   }
   assert.ok(ignored.includes("!.env.example"), "the example file is the one exception");
@@ -154,7 +154,8 @@ test("the bundled install check runs from the tarball, and can fail", options, a
 test("the bundled UI mounts and renders its home screen", options, async () => {
   await withConfig(async (file) => {
     const smoke = path.join(ROOT, "tests", "bundle-smoke.mjs");
-    const { stdout } = await run(process.execPath, [smoke, file, BUNDLE], { env, timeout: 30000 });
+    // The real UI asks the registry whether a release is out; a test must not.
+    const { stdout } = await run(process.execPath, [smoke, file, BUNDLE], { env: { ...env, LLM_PROXY_NO_UPDATE_CHECK: "1" }, timeout: 30000 });
 
     // Guards the whole Ink/React graph inside the bundle: a broken `require`
     // shim or a missing dependency shows up here and nowhere else.

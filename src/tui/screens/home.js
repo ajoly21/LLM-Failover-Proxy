@@ -4,6 +4,7 @@ import { h } from '../h.js';
 import { useLayout } from '../size.js';
 import { COLOR, SYMBOL, cell } from '../theme.js';
 import { Banner, Frame, Hints } from '../widgets.js';
+import { updateCommandLine } from '../../update.js';
 
 const ITEMS = [
   { key: 'providers', label: 'Providers', hint: 'endpoints, API keys, protocol' },
@@ -15,15 +16,17 @@ const ITEMS = [
   { key: 'quit', label: 'Quit', hint: '' },
 ];
 
-export function HomeScreen({ config, message, onSelect }) {
+export function HomeScreen({ config, message, release, onSelect }) {
   const [cursor, setCursor] = useState(0);
   const layout = useLayout();
   const width = Math.max(...ITEMS.map((item) => item.label.length));
+  const installable = Boolean(release?.available && release.installable);
 
   useInput((input, key) => {
     if (key.upArrow || input === 'k') setCursor((previous) => (previous - 1 + ITEMS.length) % ITEMS.length);
     else if (key.downArrow || input === 'j') setCursor((previous) => (previous + 1) % ITEMS.length);
     else if (key.return) onSelect(ITEMS[cursor].key);
+    else if (input === 'u' && installable) onSelect('update');
     else if (input === 'q' || key.escape) onSelect('quit');
     else {
       const index = Number(input) - 1;
@@ -41,11 +44,28 @@ export function HomeScreen({ config, message, onSelect }) {
           ['↑↓', 'move'],
           ['enter', 'open'],
           ['1-7', 'jump'],
+          installable ? ['u', 'update'] : null,
           ['q', 'quit'],
         ],
       }),
     },
     h(Banner, { config, message }),
+    release?.available
+      ? h(
+          Box,
+          { paddingX: 1 },
+          h(
+            Text,
+            { wrap: 'truncate' },
+            h(Text, { color: COLOR.warn }, `${SYMBOL.on} update available `),
+            h(Text, { dimColor: true }, `${release.current} → `),
+            h(Text, { bold: true }, release.latest),
+            installable
+              ? h(Text, { dimColor: true }, '   press u to install it')
+              : h(Text, { dimColor: true }, `   ${updateCommandLine()}`),
+          ),
+        )
+      : null,
     h(
       Box,
       { flexDirection: 'column', paddingTop: 1 },

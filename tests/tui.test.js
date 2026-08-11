@@ -10,6 +10,7 @@ import { App } from '../src/tui/app.js';
 import { loadConfig } from '../src/config.js';
 import { resetEnvCache } from '../src/env.js';
 import { SETTINGS } from '../src/tui/screens/settings.js';
+import { PRESETS } from '../src/presets.js';
 import { startMock } from './mock-provider.js';
 
 // Built from code points: raw control bytes in a source file are invisible and
@@ -79,13 +80,20 @@ class Keyboard extends EventEmitter {
  * Renders the app against a throwaway config file. Pass `columns`/`rows` to run
  * it on a terminal of that size instead of the shared 100-column renderer.
  */
-async function mount({ providers = [], models = [], view, columns, rows } = {}) {
+async function mount({ providers = [], models = [], view, columns, rows, update } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-tui-'));
   const file = path.join(dir, 'config.json');
   await fs.writeFile(file, JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models }));
 
   const finished = [];
-  const props = { configFile: file, onFinish: (outcome) => finished.push(outcome), initialView: view };
+  // No test ever reaches the registry: the default checker is replaced by one
+  // that answers whatever the case under test needs, immediately.
+  const props = {
+    configFile: file,
+    onFinish: (outcome) => finished.push(outcome),
+    initialView: view,
+    checkUpdate: async () => update ?? { current: '1.0.0', latest: null, available: false, installable: false },
+  };
   let ui;
   if (columns || rows) {
     const { render: inkRender } = await import('ink');
@@ -160,6 +168,57 @@ test('home screen lists the menu and reports the configuration', async () => {
     assert.match(frame, /127\.0\.0\.1:47821/);
     assert.match(frame, /providers 1/);
     assert.match(frame, /models 1/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a published release is announced on the menu, and u installs it', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('llama', 'groq')],
+    update: { current: '1.2.0', latest: '1.3.0', available: true, installable: true },
+  });
+  try {
+    const frame = app.frame();
+    assert.match(frame, /update available/);
+    assert.match(frame, /1\.2\.0 → 1\.3\.0/, 'from what, to what');
+    assert.match(frame, /press u to install it/);
+    assert.match(frame, /u update/, 'and the key is in the hints');
+
+    await app.press('u');
+    assert.deepEqual(app.finished, [{ action: 'update', release: { current: '1.2.0', latest: '1.3.0', available: true, installable: true } }]);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a copy that must not be replaced in place is told what to run instead', async () => {
+  // A checkout, or an `npm link`: installing the release would swap the very copy
+  // being run, which is never what a developer meant by pressing a key.
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('llama', 'groq')],
+    update: { current: '1.2.0', latest: '1.3.0', available: true, installable: false },
+  });
+  try {
+    assert.match(app.frame(), /update available/);
+    assert.match(app.frame(), /npm install --global llm-failover-proxy@latest/);
+    assert.doesNotMatch(app.frame(), /press u/);
+
+    await app.press('u');
+    assert.deepEqual(app.finished, [], 'and the key does nothing');
+  } finally {
+    await app.close();
+  }
+});
+
+test('nothing is said when there is nothing to say', async () => {
+  const app = await mount({ providers: [provider('groq')], models: [model('llama', 'groq')] });
+  try {
+    assert.doesNotMatch(app.frame(), /update/, 'no line, no hint, no reserved space');
+    await app.press('u');
+    assert.deepEqual(app.finished, []);
   } finally {
     await app.close();
   }
@@ -437,7 +496,8 @@ test('adding a provider walks the preset picker then the form', async () => {
     assert.match(app.frame(), /pick a preset/);
     assert.match(app.frame(), /openai/);
 
-    await app.press(KEY.down, 3); // openai → anthropic → openrouter → groq
+    // Walked from the top of the list, however long it grows.
+    await app.press(KEY.down, PRESETS.findIndex((preset) => preset.key === 'groq'));
     await app.press(KEY.enter);
     let frame = app.frame();
     assert.match(frame, /name/);

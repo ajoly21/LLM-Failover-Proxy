@@ -4,6 +4,7 @@ import { h } from './h.js';
 import { COLOR } from './theme.js';
 import { Notice } from './widgets.js';
 import { isFirstRun, loadConfig, saveConfig } from '../config.js';
+import { checkForUpdate } from '../update.js';
 import { HomeScreen } from './screens/home.js';
 import { ProvidersScreen } from './screens/providers.js';
 import { ModelsScreen } from './screens/models.js';
@@ -19,11 +20,12 @@ const MESSAGE_TTL_MS = 4000;
  * message line. Every mutation is written to disk immediately, so a running
  * server picks it up through its config watcher.
  */
-export function App({ configFile, onFinish, initialView }) {
+export function App({ configFile, onFinish, initialView, checkUpdate = checkForUpdate }) {
   const [config, setConfig] = useState(() => loadConfig(configFile));
   // Nothing configured: open on the wizard rather than on an empty menu.
   const [view, setView] = useState(() => initialView ?? (isFirstRun(config) ? { name: 'setup' } : { name: 'home' }));
   const [message, setMessage] = useState(null);
+  const [release, setRelease] = useState(null);
   const configRef = useRef(config);
   const messageTimer = useRef(null);
 
@@ -33,6 +35,20 @@ export function App({ configFile, onFinish, initialView }) {
     },
     [],
   );
+
+  // Asked once per mount, and never waited on: the menu is already drawn by the
+  // time the registry answers, and if it never does, nothing is said.
+  useEffect(() => {
+    let cancelled = false;
+    checkUpdate({ configFile, config: configRef.current })
+      .then((result) => {
+        if (!cancelled && result?.available) setRelease(result);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [configFile, checkUpdate]);
 
   const notify = useCallback((text, tone = COLOR.ok) => {
     setMessage({ text: `  ${text}`, tone });
@@ -80,9 +96,13 @@ export function App({ configFile, onFinish, initialView }) {
       return h(HomeScreen, {
         config,
         message,
+        release,
         onSelect: (choice) => {
           if (choice === 'quit') onFinish({ action: 'quit' });
           else if (choice === 'start') onFinish({ action: 'start-server', configFile: config.__file });
+          // Installing a package while running from it is the shell's job, not
+          // this screen's: the UI closes first, then npm has the terminal.
+          else if (choice === 'update') onFinish({ action: 'update', release });
           else setView({ name: choice });
         },
       });

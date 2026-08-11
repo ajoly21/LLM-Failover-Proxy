@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
 import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
+import { checkForUpdate, updateCommand, updateCommandLine } from "./update.js";
 import { c, compact, ESC, ago, percent } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
@@ -329,12 +331,15 @@ function reportCommand(install) {
  * Exits non-zero when the command cannot be resolved, so an install script or a
  * CI job can branch on it.
  */
-export function showDoctor(config, { json = false, pathOnly = false } = {}) {
+export async function showDoctor(config, { json = false, pathOnly = false } = {}) {
   const install = describeInstall();
   const envFile = envPathFor(config.__file);
   const service = daemonStatus(config.__file);
   const login = autostartHealth(config.__file);
   const missingKeys = config.providers.filter((provider) => describeKey(provider.apiKey).state === "missing").map((provider) => provider.name);
+  // Not for --path: that one runs inside `npm install`, where asking the registry
+  // about the version being installed would be both slow and absurd.
+  const update = pathOnly ? null : await checkForUpdate({ configFile: config.__file, config });
 
   if (json) {
     process.stdout.write(
@@ -348,6 +353,7 @@ export function showDoctor(config, { json = false, pathOnly = false } = {}) {
           missingKeys,
           service: { running: service.running, pid: service.pid, url: service.url, logFile: service.logFile },
           autostart: { installed: login.installed, healthy: login.healthy, missing: login.missing, kind: login.kind, file: login.file },
+          update,
         },
         null,
         2,
@@ -378,6 +384,16 @@ export function showDoctor(config, { json = false, pathOnly = false } = {}) {
   row(
     "at login",
     login.installed ? `${login.healthy ? c.green("yes") : c.yellow("yes, but broken")} ${c.gray(`(${login.label})`)}` : c.gray("no"),
+  );
+  row(
+    "update",
+    update?.available
+      ? `${c.yellow(`${update.latest} available`)} ${c.gray(`— ${updateCommandLine()}`)}`
+      : update?.disabled
+        ? c.gray("not checked (turned off)")
+        : update?.offline
+          ? c.gray("could not reach the registry")
+          : c.gray("up to date"),
   );
   if (login.missing.length) {
     say(`           ${c.yellow(`the entry points at a ${login.missing.join(" and ")} that no longer exists`)}`);
@@ -449,7 +465,41 @@ export async function openInterface({ configFile, view } = {}) {
 
   if (outcome?.action === "start-server") {
     await startServer({ configFile: outcome.configFile ?? configFile });
+    return;
   }
+
+  if (outcome?.action === "update") await runUpdate(outcome.release);
+}
+
+/**
+ * Installs the published release, in the terminal the UI just released.
+ *
+ * Run here rather than from inside the UI on purpose: npm prints its own
+ * progress, asks its own questions, and its install hook restarts the background
+ * proxy on the new version. None of that works behind a full-screen renderer.
+ */
+async function runUpdate(release) {
+  const { command, args } = updateCommand();
+  say("");
+  say(`  ${c.gray(`${release?.current ?? "installed"} → ${release?.latest ?? "latest"}`)}   ${c.cyan(`${command} ${args.join(" ")}`)}`);
+  say("");
+
+  const status = await new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: "inherit", shell: process.platform === "win32" });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => resolve(code));
+  });
+
+  say("");
+  if (status === 0) say(`  ${c.green("updated")} ${c.gray("— the background proxy was restarted on the new version")}`);
+  else {
+    // A global install needs write access to npm's prefix, which is exactly what
+    // fails on a system-wide Node. Say what to run rather than guess at sudo.
+    say(`  ${c.red("the update did not go through")} ${c.gray(`(${status === null ? "npm not found" : `exit ${status}`})`)}`);
+    say(`  ${c.gray("run it yourself, with the rights your npm prefix needs:")} ${c.cyan(`${command} ${args.join(" ")}`)}`);
+    process.exitCode = 1;
+  }
+  say("");
 }
 
 /** Kept for callers that only need the current config on screen. */

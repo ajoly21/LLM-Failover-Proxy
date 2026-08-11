@@ -260,7 +260,7 @@ async function main() {
 
     case "doctor":
     case "check": {
-      showDoctor(loadConfig(options.configFile), { json: options.json, pathOnly: options.pathOnly });
+      await showDoctor(loadConfig(options.configFile), { json: options.json, pathOnly: options.pathOnly });
       return;
     }
 

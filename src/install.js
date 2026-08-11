@@ -17,6 +17,9 @@ import { fileURLToPath } from "node:url";
 /** Both names npm links. `llmfp` is the short one, and what we report on. */
 export const BIN_NAMES = ["llmfp", "llm-failover-proxy"];
 
+/** What this is called on the registry, which is also its longer command name. */
+export const PACKAGE_NAME = "llm-failover-proxy";
+
 /**
  * The CLI file to run when the command is not on PATH. Resolves next to this
  * module from source, and to the bundle itself once published.

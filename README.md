@@ -41,14 +41,17 @@ llm-failover-proxy
 ╭──────────────────────────────────────────────────────────────────────╮
 │ Welcome to llm-failover-proxy  one endpoint, several providers       │
 │                                                                      │
-│ ▸ 1. Use the default chain    10 models across 3 providers           │
+│ ▸ 1. Use the default chain    11 models across 3 providers           │
 │   2. Start from scratch       add your own providers and models      │
 │                                                                      │
 │   the default chain, in order:                                       │
 │     1. nvidia/z-ai/glm-5.2                                           │
-│     2. opencode/laguna-s-2.1-free                                    │
-│     3. nvidia/deepseek-ai/deepseek-v4-pro                            │
-│        … and 7 more                                                  │
+│     2. nvidia/nvidia/nemotron-3-super-120b-a12b                      │
+│     3. opencode/big-pickle                                           │
+│     4. nvidia/minimaxai/minimax-m3                                   │
+│     5. openrouter/nvidia/nemotron-3-ultra-550b-a55b:free             │
+│     6. opencode/deepseek-v4-flash-free                               │
+│        … and 5 more                                                  │
 │   keys are stored in .env, never in the configuration file           │
 ╰──────────────────────────────────────────────────────────────────────╯
  ↑↓ move · enter choose · esc skip
@@ -80,11 +83,34 @@ Cron jobs and systemd units read none of those files: give those the absolute co
 
 ### Updating
 
+**The menu tells you when a release is out, and `u` installs it.**
+
+```
+│  ● update available 1.2.0 → 1.3.0   press u to install it                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ move · enter open · 1-7 jump · u update · q quit
+```
+
+The UI closes first, then npm runs in your terminal with its own output — and its install hook restarts the background proxy on the new version. Nothing to do by hand.
+
+Or, at any time:
+
 ```bash
 npm i -g llm-failover-proxy@latest
 ```
 
-That also **replaces the running background proxy** with the version you just installed, and rewrites the login entry — no restart to do by hand. Your configuration, keys and counters live outside the package and are never touched. To find out whether an update is waiting: `npm outdated -g llm-failover-proxy`.
+Your configuration, keys and counters live outside the package and are never touched by an update.
+
+<details>
+<summary>What that check does, exactly</summary>
+
+- It runs **only when you open the UI** or run `llmfp doctor` — never in the background, and the proxy itself never checks. It asks the npm registry for one thing, `dist-tags`, a few dozen bytes.
+- The answer is cached next to your configuration in `update.json` for five minutes. That is not there to ration how often you may look: it is so that a script calling `doctor` in a loop cannot turn into traffic.
+- It is the **only outbound request** this tool makes on its own behalf. Everything else goes to the providers you configured.
+- It never delays anything: the menu is drawn first, and if the registry does not answer within a couple of seconds, nothing is said. Offline is not an error.
+- `u` only appears for a **global install**. From a checkout or an `npm link`, installing the release would replace the copy you are running, so the command is printed instead of offered.
+- Turn it off in **Settings → check for updates**, or per run with `LLM_PROXY_NO_UPDATE_CHECK=1`. `llmfp doctor` also reports what it knows.
+</details>
 
 <details>
 <summary>Not installing globally, or would rather nothing started on its own</summary>
@@ -375,6 +401,10 @@ A model set aside is still tried as a **last resort** when nothing else is avail
 | `probe.timeoutMs` | 15000   | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
 
 Deliberately separate from the deadlines above: letting a slow model finish a benchmark should not make every real request wait longer.
+
+| Key            | Default | What it does                                                                                                          |
+| -------------- | ------- | --------------------------------------------------------------------------------------------------------------------- |
+| `update.check` | `true`  | ask the npm registry once a day whether a release is out, and say so on the menu. See [Updating](#updating) for what that involves, and `LLM_PROXY_NO_UPDATE_CHECK=1` to skip it for one run |
 
 ### When to substitute, and when to refuse
 

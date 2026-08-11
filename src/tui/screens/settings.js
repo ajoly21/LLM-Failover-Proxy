@@ -227,6 +227,18 @@ export const SETTINGS = [
     get: (c) => c.probe.timeoutMs,
     set: (c, v) => { c.probe.timeoutMs = clamp(v, 1000, 300000, 15000); },
   },
+  {
+    section: 'tools',
+    label: 'check for updates',
+    type: 'boolean',
+    hint: 'Ask the npm registry, when this screen opens, whether a newer version is out.',
+    choices: [
+      ['yes', 'the menu says so when one is available, and u installs it'],
+      ['no', 'no outbound request is ever made on this tool’s own behalf'],
+    ],
+    get: (c) => c.update.check,
+    set: (c, v) => { c.update.check = Boolean(v); },
+  },
 ];
 
 function clamp(value, min, max, fallback) {

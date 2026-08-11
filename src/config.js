@@ -60,6 +60,12 @@ export const DEFAULTS = {
     // governed by what production is willing to wait for, and vice versa.
     timeoutMs: 15000,
   },
+  update: {
+    // Ask the npm registry whether a newer version exists, when the UI opens or
+    // `doctor` runs, and say so on the menu. The only outbound request this tool
+    // makes on its own behalf; `false` stops it, so does LLM_PROXY_NO_UPDATE_CHECK.
+    check: true,
+  },
   providers: [],
   models: [],
 };

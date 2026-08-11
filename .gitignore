@@ -25,3 +25,4 @@ service/
 coverage/
 .DS_Store
 test-log.txt
+update.json
