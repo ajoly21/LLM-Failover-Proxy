@@ -23,12 +23,13 @@ npm i -g llm-failover-proxy
 
 That single command:
 
-1. writes a **default chain** of models (see [`defaults/catalog.json`](defaults/catalog.json)) so there is something to serve,
-2. **starts the proxy in the background**, no terminal to keep open,
-3. registers it to **start again at every login** (Startup folder on Windows, LaunchAgent on macOS, systemd user unit on Linux),
-4. tells you which API keys are still missing.
+1. checks that your shell can actually find the `llmfp` command, and tells you what to add to `PATH` if it cannot,
+2. writes a **default chain** of models (see [`defaults/catalog.json`](defaults/catalog.json)) so there is something to serve,
+3. **starts the proxy in the background**, no terminal to keep open,
+4. registers it to **start again at every login** (Startup folder on Windows, LaunchAgent on macOS, systemd user unit on Linux),
+5. tells you which API keys are still missing.
 
-npm hides what install scripts print, so that step is silent, `llm-failover-proxy status` shows what happened (add `--foreground-scripts` to the install command to watch it live).
+npm collects what install scripts print and only shows it on failure, so those lines are written straight to your terminal instead. If you piped the install, or ran it from a script, `llm-failover-proxy doctor` says the same thing afterwards.
 
 Then run the wizard to paste your keys:
 
@@ -38,17 +39,17 @@ llm-failover-proxy
 
 ```
 ╭──────────────────────────────────────────────────────────────────────╮
-│ Welcome to llm-failover-proxy  one endpoint, several providers        │
+│ Welcome to llm-failover-proxy  one endpoint, several providers       │
 │                                                                      │
 │ ▸ 1. Use the default chain    10 models across 3 providers           │
-│   2. Start from scratch       add your own providers and models       │
+│   2. Start from scratch       add your own providers and models      │
 │                                                                      │
 │   the default chain, in order:                                       │
 │     1. nvidia/z-ai/glm-5.2                                           │
 │     2. opencode/laguna-s-2.1-free                                    │
 │     3. nvidia/deepseek-ai/deepseek-v4-pro                            │
 │        … and 7 more                                                  │
-│   keys are stored in .env, never in the configuration file            │
+│   keys are stored in .env, never in the configuration file           │
 ╰──────────────────────────────────────────────────────────────────────╯
  ↑↓ move · enter choose · esc skip
 ```
@@ -56,6 +57,34 @@ llm-failover-proxy
 It then asks for one key per provider, showing where to get each one. **Press enter to skip any of them**, a provider with no key is simply stepped over in the chain. Keys are saved to a `.env`; the configuration file only ever stores the _name_ of the variable, so it stays safe to share.
 
 Nothing to install permanently? Use `npx llm-failover-proxy` instead, same tool, no background service and no login entry.
+
+### `llmfp: command not found`
+
+The proxy itself is fine — it runs from absolute paths and needs no `PATH` at all. The _command_ does, and npm links it into a directory your shell may not look in. This happens with **nvm, fnm, volta**, or after `npm config set prefix`. Ask where it went:
+
+```bash
+llm-failover-proxy doctor        # or, if that is the command you cannot run:
+npm bin -g
+```
+
+Then add that directory once, and open a new terminal — a running shell keeps the `PATH` it started with:
+
+| Shell                | Once, and for good                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| PowerShell / cmd     | `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';<dir>', 'User')` |
+| bash                 | `echo 'export PATH="<dir>:$PATH"' >> ~/.profile`                                                      |
+| zsh                  | `echo 'export PATH="<dir>:$PATH"' >> ~/.zprofile`                                                     |
+| fish                 | `fish_add_path <dir>`                                                                                 |
+
+Cron jobs and systemd units read none of those files: give those the absolute command, which `doctor` prints for you.
+
+### Updating
+
+```bash
+npm i -g llm-failover-proxy@latest
+```
+
+That also **replaces the running background proxy** with the version you just installed, and rewrites the login entry — no restart to do by hand. Your configuration, keys and counters live outside the package and are never touched. To find out whether an update is waiting: `npm outdated -g llm-failover-proxy`.
 
 <details>
 <summary>Not installing globally, or would rather nothing started on its own</summary>
@@ -65,6 +94,7 @@ Nothing to install permanently? Use `npx llm-failover-proxy` instead, same tool,
 - `LLM_PROXY_NO_AUTOSTART=1 npm i -g llm-failover-proxy` installs the command and touches nothing else.
 - `CI=1` (set automatically by every CI provider) also skips it.
 - `llm-failover-proxy disable` undoes everything: no login entry, no running process.
+- On a **headless Linux** box, `systemctl --user` needs a live user session. `enable` says so when the unit could not be activated; `loginctl enable-linger $USER` makes the service survive logout.
 </details>
 
 ## Use it
@@ -130,20 +160,35 @@ llm-failover-proxy disable      remove the login entry and stop it
 llm-failover-proxy start        run in this terminal instead (ctrl+c to stop)
 llm-failover-proxy start -d     run in the background
 llm-failover-proxy migrate      move keys out of the config file into the .env
+llm-failover-proxy doctor       is this install usable from any shell?
 ```
 
 `llmfp` is a shorter alias for the same command. Add `--config <path>` to work on another configuration, `--port`/`--host` to change where it listens.
+
+**None of these needs a terminal.** Piped, scripted, or run from a cron job, every command prints plain text and exits — including `llmfp` on its own, which reports instead of opening the menus when there is nothing to draw on. `doctor` exits non-zero when the command is not on `PATH`, so an install script can branch on it, and `doctor --json` / `stats --json` give the same facts as machine-readable output.
 
 `stats` prints once and returns, the _Status & stats_ screen of the UI is the live one, refreshing every two seconds until you leave it. Use `stats` in a script or when you just want a number back, and `stats --json` to pipe it somewhere. Counters are read from the running proxy when there is one, and from the file on disk when there is not, so the numbers are there even after a restart:
 
 ```
 $ llmfp stats
 Persisted counters (nothing running, read from disk)
-  kept since 2026-08-10 09:12 · 6 request(s), 3 ok, 0 failed, 3 cancelled, 51.9k token(s)
-  PRIO  TARGET                       REQ  OK  KO  CX  TOKENS  LAST LATENCY  COOLDOWN  LAST ERROR
-  1     nvidia/z-ai/glm-5.2          3    0   0   3   0       -             -        -
-  2     opencode/laguna-s-2.1-free   3    3   0   0   51.9k   10.72s        -        -
+  kept since 2026-08-10 09:12 · 9 request(s), 4 ok, 1 failed, 4 cancelled, 51.9k token(s)
+  PRIO  TARGET                       REQ  OK  KO  CX  USE  OK%   TOKENS  LAST LATENCY  LAST ERROR
+  1     nvidia/z-ai/glm-5.2          5    1   1   3   25%  50%   12.1k   8.30s         empty: no content
+  2     opencode/laguna-s-2.1-free   4    3   0   1   75%  100%  39.8k   10.72s        -
 ```
+
+| Column       | Reads as                                                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `REQ`        | times this model was asked, racing attempts included                                                                   |
+| `OK` / `KO`  | answers it delivered / attempts that failed                                                                             |
+| `CX`         | attempts dropped because a faster model had already answered — this is why `REQ` can exceed `OK + KO`                  |
+| `USE`        | its share of the answers you actually got: how much of your traffic this model is really serving                        |
+| `OK%`        | of the attempts it was allowed to finish, how many it answered. Dropped races are excluded — losing one is not a fault  |
+| `TOKENS`     | tokens it has produced, accumulated across restarts                                                                    |
+| `LAST ERROR` | why it failed the last time, if it has                                                                                 |
+
+Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain that it is never reached, or it fails when it is — `OK%` tells you which.
 
 ### The terminal UI
 
@@ -154,21 +199,23 @@ Persisted counters (nothing running, read from disk)
 │  background running (pid 24188)                                          │
 │                                                                          │
 │ ▸ 1. Providers          endpoints, API keys, protocol                    │
-│   2. Models & priority  failover chain, live latency tests                │
+│   2. Models & priority  failover chain, live latency tests               │
 │   3. Settings           port, timeouts, failover policy                  │
-│   4. Status & stats     persisted counters and cooldowns                  │
-│   5. Setup wizard       add the default chain, paste keys                 │
-│   6. Start the server   closes this screen                                │
-│   7. Quit                                                                 │
+│   4. Status & stats     persisted counters and cooldowns                 │
+│   5. Setup wizard       add the default chain, paste keys                │
+│   6. Start the server   closes this screen                               │
+│   7. Quit                                                                │
 ╰──────────────────────────────────────────────────────────────────────────╯
  ↑↓ move · enter open · 1-7 jump · q quit
 ```
 
 Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/disable, `d` delete, `t` test, `esc` back. Changes are saved immediately, and a proxy already running in the background picks them up, no restart, not even for a key you just pasted.
 
+**It fits the terminal it is given**, down to a phone over SSH. Tables give up their least useful columns rather than wrapping — a 40-column screen keeps the priority number, the name and the on/off mark — long names shorten with a `…`, and lists take only the rows the window has. Resize the window and it follows.
+
 **Providers**, ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
 
-**Models & priority**, the chain, in failover order. `⇧↑`/`⇧↓` (or `J`/`K`) move a model up or down.
+**Models & priority**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
 
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
@@ -177,6 +224,15 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 ▸ 1  fast   groq        llama-3.3-70b        ●   ✓   412ms   85.3
   2  big    openrouter  nemotron-3-ultra     ●   ⋯       -       -
   3  local  ollama      qwen3:8b             ●   ✗       -       -
+```
+
+The same screen on a 40-column phone, holding the first model to move it:
+
+```
+   #  ALIAS                    ON
+⇅  1  nvidia/nemotron-3-ultr…  ●
+   2  laguna-s-2.1-free        ●
+   3  big-pickle               ●
 ```
 
 `TTFT` is the wait before the first token, `TOK/S` the speed after it — the two numbers that tell you whether a model is worth its place in the chain. Token totals live in the counters (`llmfp stats`), where they add up over time.
@@ -257,13 +313,13 @@ Everything below is in the UI under `3. Settings`, where each line explains itse
 
 ### Where it listens
 
-| Key | Default | What it does |
-|---|---|---|
-| `server.host` | `127.0.0.1` | `127.0.0.1` = this machine only. `0.0.0.0` exposes it to your network — **set `server.apiKey` first** |
-| `server.port` | `47821` | the port your apps point at. If it is taken, the next free one is used and printed at startup |
-| `server.apiKey` | none | key your own apps must send. Empty means no check, which is fine on `127.0.0.1`. `env:LLM_PROXY_API_KEY` keeps it in the `.env` |
-| `server.cors` | `true` | whether a web page may call the proxy straight from the browser |
-| `server.logLevel` | `info` | `debug` prints every attempt and its timing |
+| Key               | Default     | What it does                                                                                                                    |
+| ----------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `server.host`     | `127.0.0.1` | `127.0.0.1` = this machine only. `0.0.0.0` exposes it to your network — **set `server.apiKey` first**                           |
+| `server.port`     | `47821`     | the port your apps point at. If it is taken, the next free one is used and printed at startup                                   |
+| `server.apiKey`   | none        | key your own apps must send. Empty means no check, which is fine on `127.0.0.1`. `env:LLM_PROXY_API_KEY` keeps it in the `.env` |
+| `server.cors`     | `true`      | whether a web page may call the proxy straight from the browser                                                                 |
+| `server.logLevel` | `info`      | `debug` prints every attempt and its timing                                                                                     |
 
 ### While one request is in flight
 
@@ -280,46 +336,46 @@ There are several timers because "too slow" means different things before, durin
               └─ not streaming? requestTimeoutMs (15s) for the whole answer
 ```
 
-| Key | Default | Expires when |
-|---|---|---|
-| `firstTokenTimeoutMs` | 15000 | a streamed answer has not **started** |
-| `idleTimeoutMs` | 60000 | a started stream has gone **quiet** that long |
-| `requestTimeoutMs` | 15000 | a non-streamed answer has not arrived **complete** |
-| `hedgeDelayMs` | 5000 | your favourite model has had that long alone — the next one is asked too, and the first usable answer wins. `0` = strictly one at a time |
-| `maxInFlight` | 3 | how many models may work on that request at once. `1` disables racing. Every loser still generated tokens you may be billed for |
-| `maxAttempts` | 0 | how many models to try before giving up. `0` = the whole chain |
+| Key                   | Default | Expires when                                                                                                                             |
+| --------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `firstTokenTimeoutMs` | 15000   | a streamed answer has not **started**                                                                                                    |
+| `idleTimeoutMs`       | 60000   | a started stream has gone **quiet** that long                                                                                            |
+| `requestTimeoutMs`    | 15000   | a non-streamed answer has not arrived **complete**                                                                                       |
+| `hedgeDelayMs`        | 5000    | your favourite model has had that long alone — the next one is asked too, and the first usable answer wins. `0` = strictly one at a time |
+| `maxInFlight`         | 3       | how many models may work on that request at once. `1` disables racing. Every loser still generated tokens you may be billed for          |
+| `maxAttempts`         | 0       | how many models to try before giving up. `0` = the whole chain                                                                           |
 
 Only one of the first three applies to a given request: the first two if the client asked for a stream, the third otherwise.
 
 ### Afterwards, for the next requests
 
-A **cooldown is not a timeout.** A timeout ends one attempt; a cooldown decides how long a model that keeps failing is *skipped by the requests that follow*, so a dead provider is not retried on every single call.
+A **cooldown is not a timeout.** A timeout ends one attempt; a cooldown decides how long a model that keeps failing is _skipped by the requests that follow_, so a dead provider is not retried on every single call.
 
-| Key | Default | What it does |
-|---|---|---|
-| `cooldown.failuresBeforeTrip` | 2 | consecutive failures that put a model aside. A `429` or an auth error puts it aside immediately, whatever this says |
-| `cooldown.baseMs` / `maxMs` | 15000 / 300000 | how long it stays aside: `baseMs` the first time, doubling with each new failure, capped at `maxMs`. A `Retry-After` from the provider wins over both. Any success clears it |
+| Key                           | Default        | What it does                                                                                                                                                                 |
+| ----------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cooldown.failuresBeforeTrip` | 2              | consecutive failures that put a model aside. A `429` or an auth error puts it aside immediately, whatever this says                                                          |
+| `cooldown.baseMs` / `maxMs`   | 15000 / 300000 | how long it stays aside: `baseMs` the first time, doubling with each new failure, capped at `maxMs`. A `Retry-After` from the provider wins over both. Any success clears it |
 
 A model set aside is still tried as a **last resort** when nothing else is available, and the time it has left shows up in the `COOLDOWN` column of `llmfp stats`.
 
 ### Tests you run yourself
 
-| Key | Default | Expires when |
-|---|---|---|
-| `probe.timeoutMs` | 15000 | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+| Key               | Default | Expires when                                                                                                                               |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `probe.timeoutMs` | 15000   | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
 
 Deliberately separate from the deadlines above: letting a slow model finish a benchmark should not make every real request wait longer.
 
 ### When to substitute, and when to refuse
 
-These four decide whether the client gets *an* answer or *the* answer. This is where a proxy can help you or lie to you, so they are worth a minute.
+These four decide whether the client gets _an_ answer or _the_ answer. This is where a proxy can help you or lie to you, so they are worth a minute.
 
-| Key | Default | The question it answers |
-|---|---|---|
-| `strictModelMatch` | `false` | A client asks for a model that is **nowhere in your chain**. `false`: the whole chain answers anyway — apps that hardcode `gpt-4o` just work. `true`: `404`, no provider is called |
-| `crossModelFallback` | `true` | The requested model is **known but failing**. `true`: the rest of the chain takes over. `false`: the request fails rather than switch model |
-| `treatContentFilterAsFailure` | `true` | A provider cut the answer for content reasons. `true`: try another model. `false`: hand the refusal back as it came |
-| `streamErrorAsMessage` | `true` | Every model failed on a streamed request. `true`: the reason is streamed as a readable answer. `false`: a bare `502`, which most chat apps render as an empty reply |
+| Key                           | Default | The question it answers                                                                                                                                                            |
+| ----------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `strictModelMatch`            | `false` | A client asks for a model that is **nowhere in your chain**. `false`: the whole chain answers anyway — apps that hardcode `gpt-4o` just work. `true`: `404`, no provider is called |
+| `crossModelFallback`          | `true`  | The requested model is **known but failing**. `true`: the rest of the chain takes over. `false`: the request fails rather than switch model                                        |
+| `treatContentFilterAsFailure` | `true`  | A provider cut the answer for content reasons. `true`: try another model. `false`: hand the refusal back as it came                                                                |
+| `streamErrorAsMessage`        | `true`  | Every model failed on a streamed request. `true`: the reason is streamed as a readable answer. `false`: a bare `502`, which most chat apps render as an empty reply                |
 
 The first two are often confused. They act at different moments:
 
@@ -328,7 +384,7 @@ client asks for "typo-3.5"          →  strictModelMatch decides    (unknown na
 client asks for "fast", fast is 500 →  crossModelFallback decides  (known, failing)
 ```
 
-So for **"never serve me anything other than what I asked for"**, you need both: `strictModelMatch: true` *and* `crossModelFallback: false`. With the defaults, the opposite is true — something always tries to answer, and the `x-llm-proxy-model` header tells you who actually did.
+So for **"never serve me anything other than what I asked for"**, you need both: `strictModelMatch: true` _and_ `crossModelFallback: false`. With the defaults, the opposite is true — something always tries to answer, and the `x-llm-proxy-model` header tells you who actually did.
 
 ## Troubleshooting
 

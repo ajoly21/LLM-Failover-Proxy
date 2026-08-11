@@ -52,6 +52,19 @@ export function ms(value) {
   return value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(2)}s`;
 }
 
+/**
+ * A share, as `42%`. A ratio with no denominator has no value to show — `0%`
+ * would claim a measurement that was never taken — so it reads `-` instead.
+ * Small shares keep one decimal, or every rare model would round to `0%`.
+ */
+export function percent(part, whole) {
+  const above = Number(part);
+  const below = Number(whole);
+  if (!Number.isFinite(above) || !Number.isFinite(below) || below <= 0) return "-";
+  const value = (above / below) * 100;
+  return value > 0 && value < 9.95 ? `${value.toFixed(1)}%` : `${Math.round(value)}%`;
+}
+
 const SCALES = [
   { limit: 1e3, suffix: "k" },
   { limit: 1e6, suffix: "M" },

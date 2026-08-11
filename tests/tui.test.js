@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,14 +30,74 @@ const KEY = {
 
 const tick = (times = 2) => new Promise((resolve) => setTimeout(resolve, 20 * times));
 
-/** Renders the app against a throwaway config file. */
-async function mount({ providers = [], models = [], view } = {}) {
+/**
+ * A terminal of a chosen size. The shared test renderer is fixed at 100 columns
+ * and has no height at all, so anything about fitting a small screen has to go
+ * through ink itself — which is also the only thing that truncates and wraps.
+ */
+class Terminal extends EventEmitter {
+  constructor(columns, rows) {
+    super();
+    this.columns = columns;
+    this.rows = rows;
+  }
+  write = (frame) => {
+    this.frame = frame;
+  };
+  /** Without the colour codes, and without the trailing blank line ink adds. */
+  lastFrame = () => (this.frame ?? '').replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').replace(/\n$/, '');
+  lines = () => this.lastFrame().split('\n');
+}
+
+/**
+ * Ink reads a keypress either as a `data` event or through the readable
+ * protocol, depending on the terminal it was handed. A stand-in has to offer
+ * both, or the arrows silently do nothing.
+ */
+class Keyboard extends EventEmitter {
+  isTTY = true;
+  data = null;
+  setEncoding() {}
+  setRawMode() {}
+  resume() {}
+  pause() {}
+  ref() {}
+  unref() {}
+  write = (data) => {
+    this.data = data;
+    this.emit('readable');
+    this.emit('data', data);
+  };
+  read = () => {
+    const { data } = this;
+    this.data = null;
+    return data;
+  };
+}
+
+/**
+ * Renders the app against a throwaway config file. Pass `columns`/`rows` to run
+ * it on a terminal of that size instead of the shared 100-column renderer.
+ */
+async function mount({ providers = [], models = [], view, columns, rows } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-tui-'));
   const file = path.join(dir, 'config.json');
   await fs.writeFile(file, JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models }));
 
   const finished = [];
-  const ui = render(h(App, { configFile: file, onFinish: (outcome) => finished.push(outcome), initialView: view }));
+  const props = { configFile: file, onFinish: (outcome) => finished.push(outcome), initialView: view };
+  let ui;
+  if (columns || rows) {
+    const { render: inkRender } = await import('ink');
+    const stdout = new Terminal(columns ?? 80, rows ?? 24);
+    const stdin = new Keyboard();
+    // `debug` makes ink write every frame out, the way the test renderer does.
+    const app = inkRender(h(App, props), { stdout, stdin, debug: true, patchConsole: false, exitOnCtrlC: false });
+    ui = { stdin, lastFrame: () => stdout.lastFrame(), lines: () => stdout.lines(), unmount: () => app.unmount() };
+  } else {
+    ui = render(h(App, props));
+    ui.lines = () => ui.lastFrame().split('\n');
+  }
   await tick();
 
   return {
@@ -44,6 +105,7 @@ async function mount({ providers = [], models = [], view } = {}) {
     file,
     finished,
     frame: () => ui.lastFrame(),
+    lines: () => ui.lines(),
     config: () => loadConfig(file),
     async press(sequence, times = 1) {
       for (let i = 0; i < times; i += 1) {
@@ -276,6 +338,59 @@ test('models screen reorders the chain with shift+arrows and J/K', async () => {
     await app.press(KEY.up);
     await app.press(KEY.shiftUp, 2); // at the boundary: no move, no crash
     assert.deepEqual(app.config().models.map((entry) => entry.model), ['first', 'second', 'third']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a model can be picked up and carried with plain arrows', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq'), model('second', 'groq'), model('third', 'groq')],
+    view: { name: 'models' },
+  });
+  const order = () => app.config().models.map((entry) => entry.model);
+  try {
+    // No modifier anywhere in this test: a phone keyboard cannot send one.
+    await app.press('m');
+    assert.match(app.frame(), /moving first/, 'the screen says what is being carried');
+    assert.match(app.frame(), /drop it here/);
+
+    await app.press(KEY.down);
+    assert.deepEqual(order(), ['second', 'first', 'third'], 'the arrow carried the model, not the cursor');
+
+    await app.press(KEY.down);
+    assert.deepEqual(order(), ['second', 'third', 'first']);
+
+    // At the bottom edge: nothing moves, nothing throws.
+    await app.press(KEY.down);
+    assert.deepEqual(order(), ['second', 'third', 'first']);
+
+    await app.press(KEY.enter);
+    assert.doesNotMatch(app.frame(), /moving first/, 'dropped');
+    assert.match(app.frame(), /3 in the chain/, 'and the screen is back to its usual subtitle');
+
+    // And the arrows move the cursor again, leaving the order alone.
+    await app.press(KEY.up, 2);
+    assert.deepEqual(order(), ['second', 'third', 'first']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('escape drops a held model where it is, rather than putting it back', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq'), model('second', 'groq')],
+    view: { name: 'models' },
+  });
+  try {
+    await app.press('m');
+    await app.press(KEY.down);
+    await app.press(KEY.escape);
+    assert.deepEqual(app.config().models.map((entry) => entry.model), ['second', 'first']);
+    // Still on the models screen: escape dropped the model, it did not go back.
+    assert.match(app.frame(), /Models & priority/);
   } finally {
     await app.close();
   }
@@ -534,6 +649,149 @@ test('escape walks back to the home screen', async () => {
     assert.match(app.frame(), /PROTOCOL/);
     await app.press(KEY.escape);
     assert.match(app.frame(), /Models & priority/, 'back on the home menu');
+  } finally {
+    await app.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Small screens: a phone over SSH is one of the places this runs      *
+ * ------------------------------------------------------------------ */
+
+const PHONE = { columns: 40, rows: 20 };
+
+/** Widest rendered line, and how many rows the screen actually took. */
+const shape = (app) => {
+  const lines = app.lines();
+  return { width: Math.max(...lines.map((line) => line.length)), height: lines.length };
+};
+
+const chain = (count) =>
+  Array.from({ length: count }, (_, index) =>
+    model(index === 0 ? 'nvidia/nemotron-3-ultra-550b-a55b:free' : `model-number-${index}`, 'groq'),
+  );
+
+test('the reorder that needs no modifier works on a phone-sized terminal', async () => {
+  const app = await mount({
+    ...PHONE,
+    providers: [provider('groq')],
+    models: [model('first', 'groq'), model('second', 'groq'), model('third', 'groq')],
+    view: { name: 'models' },
+  });
+  try {
+    await app.press('m');
+    assert.match(app.frame(), /moving first/);
+    await app.press(KEY.down);
+    assert.deepEqual(app.config().models.map((entry) => entry.model), ['second', 'first', 'third']);
+
+    const { width, height } = shape(app);
+    assert.ok(width <= PHONE.columns && height <= PHONE.rows, 'and holding a model does not make the screen overflow');
+  } finally {
+    await app.close();
+  }
+});
+
+/** Counters for a full chain, so the status screen has something to crowd with. */
+const busyStats = (models) => ({
+  uptimeSec: 4210,
+  statsSince: Date.UTC(2026, 7, 10, 7, 37),
+  totals: { requests: 42, successes: 20, failures: 3, cancelled: 19, tokens: 812345 },
+  chain: models.map((entry, index) => ({
+    priority: index + 1,
+    provider: 'groq',
+    model: entry.model,
+    requests: index ? 0 : 22,
+    successes: index ? 0 : 4,
+    failures: index === 1 ? 3 : 0,
+    cancelled: index ? 0 : 18,
+    tokens: index ? 0 : 400000,
+    lastLatencyMs: index ? null : 8300,
+    coolingDown: false,
+    cooldownMsLeft: 0,
+    lastError: index === 1 ? { reason: 'rate_limited', message: 'HTTP 429 slow down, retry in 37s' } : null,
+  })),
+});
+
+test('on a phone-sized terminal, no screen overflows in either direction', async () => {
+  const models = chain(7);
+  const views = [
+    { name: 'home' },
+    { name: 'models' },
+    { name: 'providers' },
+    { name: 'settings' },
+    { name: 'status', fetchStats: async () => busyStats(models), pollMs: 99999 },
+  ];
+  for (const view of views) {
+    const app = await mount({ ...PHONE, providers: [provider('groq'), provider('openrouter')], models, view });
+    try {
+      const { width, height } = shape(app);
+      assert.ok(width <= PHONE.columns, `${view.name} is ${width} columns wide, the terminal has ${PHONE.columns}`);
+      assert.ok(height <= PHONE.rows, `${view.name} needs ${height} rows, the terminal has ${PHONE.rows}`);
+    } finally {
+      await app.close();
+    }
+  }
+});
+
+test('a narrow table drops columns rather than losing the state of a row', async () => {
+  const app = await mount({ ...PHONE, providers: [provider('groq')], models: chain(4), view: { name: 'models' } });
+  try {
+    const frame = app.frame();
+    // The alias identifies the row and the mark says whether it is enabled:
+    // those two survive, and every model still has a line of its own.
+    assert.match(frame, /ALIAS/);
+    assert.match(frame, /ON/);
+    assert.doesNotMatch(frame, /TOK\/S/, 'throughput is the first thing a phone gives up');
+    assert.doesNotMatch(frame, /PROVIDER/);
+    for (let index = 1; index <= 4; index += 1) assert.match(frame, new RegExp(String.raw`\s${index}\s`), `row ${index} is on screen`);
+    // The long alias is shortened, not wrapped onto a second line.
+    assert.match(frame, /nvidia\/nemotron\S*…/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the two shares are the last counters standing on a narrow screen', async () => {
+  const models = chain(5);
+  const app = await mount({
+    ...PHONE,
+    providers: [provider('groq')],
+    models,
+    view: { name: 'status', fetchStats: async () => busyStats(models), pollMs: 99999 },
+  });
+  try {
+    const frame = app.frame();
+    assert.match(frame, /USE/);
+    assert.match(frame, /OK%/);
+    assert.doesNotMatch(frame, /TOKENS/, 'token totals are the first thing to go');
+    assert.doesNotMatch(frame, /LAST ERROR/);
+    // A percentage still reads with nothing to compare it against; a raw count
+    // does not, so the counts are what give way first.
+    assert.doesNotMatch(frame, /\sREQ\s/);
+    assert.match(frame, /100%/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the title keeps its own characters when the terminal is narrow', async () => {
+  const app = await mount({ ...PHONE, providers: [provider('groq')], view: { name: 'providers' } });
+  try {
+    // Ink shrinks a flexible sibling before wrapping: the title must not be one,
+    // or "Providers" comes back as "Provide" and an orphaned "s".
+    assert.match(app.frame(), /Providers/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a wide terminal shows every column, and more rows', async () => {
+  const app = await mount({ columns: 160, rows: 40, providers: [provider('groq')], models: chain(7), view: { name: 'models' } });
+  try {
+    const frame = app.frame();
+    for (const label of ['ALIAS', 'PROVIDER', 'MODEL', 'ON', 'TTFT', 'TOK/S']) assert.match(frame, new RegExp(label));
+    assert.doesNotMatch(frame, /showing 1-/, 'all seven rows fit, so nothing is windowed away');
+    assert.match(frame, /nvidia\/nemotron-3-ultra-550b-a55b:free/, 'and the long name is not shortened');
   } finally {
     await app.close();
   }

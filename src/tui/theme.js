@@ -1,5 +1,6 @@
 export const SYMBOL = {
   cursor: '▸',
+  grab: '⇅',
   ok: '✓',
   fail: '✗',
   queued: '·',
@@ -32,4 +33,4 @@ export function windowAround(total, cursor, size) {
 
 // Shared with the plain-text report rather than reimplemented: one definition
 // of what a duration or a large count looks like across the whole project.
-export { ms as duration, compact } from '../logger.js';
+export { ms as duration, compact, percent } from '../logger.js';

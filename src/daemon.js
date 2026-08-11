@@ -39,6 +39,7 @@ export const runtimePathFor = (configFile) => sibling(configFile, "daemon.json")
 export const logPathFor = (configFile) => sibling(configFile, "daemon.log");
 const servicePathFor = (configFile) => sibling(configFile, path.join("service", "llm-failover-proxy.mjs"));
 const originPathFor = (configFile) => sibling(configFile, path.join("service", "origin.json"));
+const autostartRecordFor = (configFile) => sibling(configFile, path.join("service", "autostart.json"));
 
 /**
  * The background process runs from a copy of the CLI kept next to the config,
@@ -346,17 +347,30 @@ function autostartContents(kind, configFile) {
   ].join("\n");
 }
 
-/** Best effort: a missing service manager must not turn into a hard failure. */
+/**
+ * Best effort: a missing service manager must not turn into a hard failure. The
+ * hint matters, though — `systemctl --user` needs a session bus, which a
+ * provisioning script over SSH does not have, and silently reporting success
+ * there would promise a service that never comes back.
+ */
 function activate(kind, file) {
   if (kind === "launchagent") {
     const result = spawnSync("launchctl", ["load", "-w", file], { stdio: "ignore" });
-    return result.status === 0;
+    if (result.status === 0) return { activated: true, hint: null };
+    return { activated: false, hint: "launchctl refused it now; it still loads at your next login" };
   }
   if (kind === "systemd-user") {
-    if (spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" }).error) return false;
-    return spawnSync("systemctl", ["--user", "enable", `${SERVICE_NAME}.service`], { stdio: "ignore" }).status === 0;
+    const reload = spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+    const enabled = reload.error ? null : spawnSync("systemctl", ["--user", "enable", `${SERVICE_NAME}.service`], { stdio: "ignore" });
+    if (enabled?.status === 0) return { activated: true, hint: null };
+    return {
+      activated: false,
+      hint: reload.error
+        ? "systemctl is not available; the unit file is written, nothing will read it"
+        : "`systemctl --user` needs a user session — over SSH, try `loginctl enable-linger $USER`",
+    };
   }
-  return true; // the Startup folder needs nothing
+  return { activated: true, hint: null }; // the Startup folder needs nothing
 }
 
 function deactivate(kind, file) {
@@ -372,7 +386,33 @@ export function installAutostart({ configFile }) {
   } catch (err) {
     return { ...target, installed: false, error: err.message };
   }
-  return { ...target, installed: true, activated: activate(target.kind, target.file) };
+  // What the entry hard-codes, so a later run can tell whether it still holds.
+  try {
+    const record = { node: process.execPath, entry: serviceEntry(path.resolve(configFile)), configFile: path.resolve(configFile), kind: target.kind };
+    fs.writeFileSync(autostartRecordFor(configFile), `${JSON.stringify(record, null, 2)}\n`);
+  } catch {
+    /* only costs `doctor` some detail */
+  }
+  return { ...target, installed: true, ...activate(target.kind, target.file) };
+}
+
+/**
+ * A login entry cannot be relative: it names one node binary and one script.
+ * Both can disappear under it — a version manager switching node is enough — and
+ * the failure is silent, since nothing runs to complain about it. So it is
+ * checked on demand rather than trusted.
+ */
+export function autostartHealth(configFile) {
+  const target = autostartTarget();
+  const installed = fs.existsSync(target.file);
+  let record = null;
+  try {
+    record = JSON.parse(fs.readFileSync(autostartRecordFor(configFile), "utf8"));
+  } catch {
+    /* an entry written before this record existed simply cannot be checked */
+  }
+  const missing = ["node", "entry"].filter((key) => typeof record?.[key] === "string" && !fs.existsSync(record[key]));
+  return { ...target, installed, record, missing, healthy: installed && missing.length === 0 };
 }
 
 export function removeAutostart() {

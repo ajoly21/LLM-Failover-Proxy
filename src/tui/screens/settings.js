@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { h } from '../h.js';
+import { useLayout } from '../size.js';
 import { COLOR, SYMBOL, cell, windowAround } from '../theme.js';
 import { Frame, Hints, TextField, editText } from '../widgets.js';
 import { maskSecret } from '../../config.js';
@@ -27,7 +28,7 @@ const SECTIONS = {
   tools: 'Tests you run yourself',
 };
 
-/** Rows visible at once; the rest scrolls with the cursor. */
+/** Most rows visible at once; a shorter terminal gets fewer, and scrolls. */
 const MAX_ROWS = 12;
 
 export const SETTINGS = [
@@ -237,9 +238,12 @@ function clamp(value, min, max, fallback) {
 export function SettingsScreen({ config, update, notify, onBack }) {
   const [cursor, setCursor] = useState(0);
   const [draft, setDraft] = useState(null); // in-place editor buffer
+  const layout = useLayout();
 
   const setting = SETTINGS[cursor];
-  const labelWidth = Math.max(...SETTINGS.map((entry) => entry.label.length));
+  // Long enough for the longest label, unless that would leave no room for the
+  // value it is there to introduce.
+  const labelWidth = Math.min(Math.max(...SETTINGS.map((entry) => entry.label.length)), Math.max(12, layout.inner - 14));
 
   const commit = (value) => {
     update((next) => setting.set(next, value));
@@ -307,7 +311,9 @@ export function SettingsScreen({ config, update, notify, onBack }) {
   // Windowed, so the list cannot outgrow a short terminal, and headed by
   // section, because "which of these five timers is this one" is the question
   // the flat list never answered.
-  const { start, end } = windowAround(SETTINGS.length, cursor, MAX_ROWS);
+  // Reserved: frame, title, hints, the help block, section headings — all of
+  // which take more lines when they have to wrap.
+  const { start, end } = windowAround(SETTINGS.length, cursor, Math.min(MAX_ROWS, layout.listRows(layout.narrow ? 15 : 12)));
   const rows = [];
   let shown = null;
   for (let index = start; index < end; index += 1) {
@@ -345,7 +351,7 @@ export function SettingsScreen({ config, update, notify, onBack }) {
               ],
       }),
     },
-    h(Box, { flexDirection: 'column', paddingTop: 1 }, h(Box, { flexDirection: 'column' }, ...rows), h(Help, { setting, value: setting.get(config) })),
+    h(Box, { flexDirection: 'column', paddingTop: 1 }, h(Box, { flexDirection: 'column' }, ...rows), h(Help, { setting, value: setting.get(config), layout })),
   );
 }
 
@@ -354,12 +360,15 @@ export function SettingsScreen({ config, update, notify, onBack }) {
  * means with the current one marked. Fixed height, so moving through the list
  * does not shift the table above.
  */
-function Help({ setting, value }) {
+function Help({ setting, value, layout }) {
   const lines = [h(Text, { key: 'hint', dimColor: true }, `  ${setting.hint ?? ''}`)];
 
   if (setting.choices) {
     for (const [answer, meaning] of setting.choices) {
       const current = (answer === 'yes') === Boolean(value);
+      // Narrow: only the answer in force. Spelling out the other one is what
+      // makes this block three wrapped lines instead of one.
+      if (layout?.narrow && !current) continue;
       lines.push(
         h(
           Text,
@@ -372,5 +381,5 @@ function Help({ setting, value }) {
     lines.push(h(Text, { key: 'example', dimColor: true }, `    ${setting.example}`));
   }
 
-  return h(Box, { flexDirection: 'column', minHeight: 4, paddingTop: 1 }, ...lines);
+  return h(Box, { flexDirection: 'column', minHeight: layout?.narrow ? 2 : 4, paddingTop: 1 }, ...lines);
 }

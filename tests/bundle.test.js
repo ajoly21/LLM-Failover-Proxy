@@ -102,10 +102,31 @@ test("the bundled text commands work", options, async () => {
   });
 });
 
-test("the bundled UI refuses to start without a terminal", options, async () => {
-  const { stdout } = await run(process.execPath, [BUNDLE], { env });
-  assert.match(stdout, /needs a terminal/);
-  assert.match(stdout, /start/);
+test("with no terminal, the bundled UI reports instead of opening menus", options, async () => {
+  await withConfig(async (file) => {
+    // `execFile` gives the child pipes: the same thing a script or a CI job does.
+    const { stdout } = await run(process.execPath, [BUNDLE, "--config", file], { env, cwd: path.dirname(file) });
+    assert.match(stdout, /no terminal attached/);
+    assert.match(stdout, /Effective failover order/, "and what it prints is the report, not a refusal");
+  });
+});
+
+test("the bundled install check runs from the tarball, and can fail", options, async () => {
+  await withConfig(async (file) => {
+    const { stdout } = await run(process.execPath, [BUNDLE, "doctor", "--config", file], { env, cwd: path.dirname(file) });
+    assert.match(stdout, /command\s+/, "the PATH check is what the installer calls");
+    assert.match(stdout, /node\s+/);
+
+    // An empty PATH is the whole point of the check: node is found by absolute path.
+    await assert.rejects(
+      () => run(process.execPath, [BUNDLE, "doctor", "--path", "--config", file], { env: { ...env, PATH: path.dirname(file) }, cwd: path.dirname(file) }),
+      (err) => {
+        assert.equal(err.code, 1);
+        assert.match(err.stdout, /is not on your PATH/);
+        return true;
+      },
+    );
+  });
 });
 
 test("the bundled UI mounts and renders its home screen", options, async () => {

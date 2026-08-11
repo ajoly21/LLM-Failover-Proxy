@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { h } from '../h.js';
+import { useLayout } from '../size.js';
 import { COLOR, SYMBOL, cell } from '../theme.js';
 import { Banner, Frame, Hints } from '../widgets.js';
 
@@ -16,6 +17,7 @@ const ITEMS = [
 
 export function HomeScreen({ config, message, onSelect }) {
   const [cursor, setCursor] = useState(0);
+  const layout = useLayout();
   const width = Math.max(...ITEMS.map((item) => item.label.length));
 
   useInput((input, key) => {
@@ -50,10 +52,13 @@ export function HomeScreen({ config, message, onSelect }) {
       ...ITEMS.map((item, index) =>
         h(
           Text,
-          { key: item.key, inverse: index === cursor },
+          { key: item.key, inverse: index === cursor, wrap: 'truncate' },
           `${index === cursor ? SYMBOL.cursor : ' '} ${index + 1}. `,
           cell(item.label, width),
-          h(Text, { dimColor: index !== cursor, color: index === cursor ? undefined : COLOR.accent }, `  ${item.hint}`),
+          // The hint doubles the width of every line: on a phone the label and
+          // the number are enough to choose by, and wrapping would double the
+          // height of the menu as well.
+          layout.narrow ? null : h(Text, { dimColor: index !== cursor, color: index === cursor ? undefined : COLOR.accent }, `  ${item.hint}`),
         ),
       ),
     ),

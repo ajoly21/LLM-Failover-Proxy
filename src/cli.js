@@ -1,8 +1,9 @@
 import fs from "node:fs";
-import { describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
-import { autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
+import { configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
+import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
-import { c, compact, ESC, ms } from "./logger.js";
+import { describeInstall, pathAdvice } from "./install.js";
+import { c, compact, ESC, ms, percent } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 
@@ -43,6 +44,13 @@ export async function showStatus(config) {
   );
   const envFile = envPathFor(config.__file);
   say(`  ${c.gray("keys:")} ${envFile} ${fs.existsSync(envFile) ? c.gray("(found)") : c.yellow("(no .env yet)")}`);
+
+  const install = describeInstall();
+  say(
+    `  ${c.gray("command:")} ${
+      install.command.onPath ? `${install.command.name} ${c.gray(`→ ${install.command.resolved}`)}` : c.yellow(`${install.command.name} is not on PATH — run \`doctor\``)
+    }`,
+  );
 
   const service = daemonStatus(config.__file);
   say(
@@ -189,19 +197,27 @@ function printStats(stats) {
     ),
   );
   table(
-    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "TOKENS", "LAST LATENCY", "COOLDOWN", "LAST ERROR"],
-    stats.chain.map((row) => [
-      row.priority,
-      `${row.provider}/${row.model}`,
-      compact(row.requests),
-      c.green(compact(row.successes)),
-      row.failures ? c.red(compact(row.failures)) : "0",
-      row.cancelled ? c.yellow(compact(row.cancelled)) : "0",
-      compact(row.tokens),
-      ms(row.lastLatencyMs),
-      row.coolingDown ? c.yellow(ms(row.cooldownMsLeft)) : c.gray("-"),
-      row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
-    ]),
+    ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "USE", "OK%", "TOKENS", "LAST LATENCY", "LAST ERROR"],
+    // Sorted here rather than trusted: the answering proxy may be a background
+    // instance of another version, and the priority column has to read in order.
+    [...stats.chain]
+      .sort((a, b) => a.priority - b.priority)
+      .map((row) => [
+        row.priority,
+        `${row.provider}/${row.model}`,
+        compact(row.requests),
+        c.green(compact(row.successes)),
+        row.failures ? c.red(compact(row.failures)) : "0",
+        row.cancelled ? c.yellow(compact(row.cancelled)) : "0",
+        // Share of the answers served, then how often it answered when it was
+        // asked to finish. Both ignore dropped races: one served nothing, and
+        // losing a race is not unavailability.
+        percent(row.successes, stats.totals.successes),
+        percent(row.successes, row.successes + row.failures),
+        compact(row.tokens),
+        ms(row.lastLatencyMs),
+        row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
+      ]),
   );
 }
 
@@ -236,8 +252,138 @@ export async function showStats(config, { json = false } = {}) {
 }
 
 /* ------------------------------------------------------------------ *
+ * `doctor`: would this install work from a script, or at boot?         *
+ * ------------------------------------------------------------------ */
+
+const SCOPE_NOTE = {
+  local: "installed as a project dependency: the command only exists inside npm scripts, use `npx llmfp` elsewhere",
+  source: "running from a checkout or an `npm link`, not from an installed package",
+};
+
+const row = (label, value, extra = "") => say(`  ${c.gray(label.padEnd(8))} ${value}${extra}`);
+
+/** The PATH verdict, and how to fix it. Printed on its own by the installer. */
+function reportCommand(install) {
+  const { command } = install;
+  if (command.onPath) {
+    row("command", `${command.name} ${c.gray(`→ ${command.resolved}`)}`);
+    if (command.shadowed) {
+      say(`           ${c.yellow("this is not the copy that just ran")} ${c.gray(`— npm links into ${command.dir}, which comes later on PATH`)}`);
+    }
+    return true;
+  }
+
+  row("command", c.yellow(`${command.name} is not on your PATH`));
+  if (command.dir) {
+    say(`           ${c.gray("npm links its commands into")} ${command.dir}`);
+    for (const line of pathAdvice(command.dir)) say(`           ${c.gray(line)}`);
+  }
+  say(`           ${c.gray("meanwhile this always works:")} ${c.cyan(`${install.fallback} status`)}`);
+  return false;
+}
+
+/**
+ * Everything that has to hold for the proxy to be usable without a terminal: a
+ * command the shell can find, a login entry whose absolute paths still exist, a
+ * config and a `.env` outside the package directory, and a service that answers.
+ *
+ * Exits non-zero when the command cannot be resolved, so an install script or a
+ * CI job can branch on it.
+ */
+export function showDoctor(config, { json = false, pathOnly = false } = {}) {
+  const install = describeInstall();
+  const envFile = envPathFor(config.__file);
+  const service = daemonStatus(config.__file);
+  const login = autostartHealth(config.__file);
+  const missingKeys = config.providers.filter((provider) => describeKey(provider.apiKey).state === "missing").map((provider) => provider.name);
+
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ...install,
+          configFile: config.__file,
+          configExists: configExists(config.__file),
+          envFile,
+          envFileExists: fs.existsSync(envFile),
+          missingKeys,
+          service: { running: service.running, pid: service.pid, url: service.url, logFile: service.logFile },
+          autostart: { installed: login.installed, healthy: login.healthy, missing: login.missing, kind: login.kind, file: login.file },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    if (!install.command.onPath) process.exitCode = 1;
+    return;
+  }
+
+  say("");
+  if (pathOnly) {
+    if (!reportCommand(install)) process.exitCode = 1;
+    say("");
+    return;
+  }
+
+  say(`  ${c.bold(c.green("llm-failover-proxy"))} ${c.gray(install.version)}`);
+  say("");
+  const onPath = reportCommand(install);
+  row("node", install.node, install.nodeManager ? c.gray(`  (${install.nodeManager})`) : "");
+  row("cli", install.cli, SCOPE_NOTE[install.scope] ? `\n           ${c.yellow(SCOPE_NOTE[install.scope])}` : "");
+  row("config", config.__file, configExists(config.__file) ? "" : c.yellow("  (not written yet)"));
+  row("keys", envFile, fs.existsSync(envFile) ? "" : c.yellow("  (no .env yet)"));
+  row(
+    "service",
+    service.running ? `${c.green("running")} ${c.gray(`pid ${service.pid} · ${service.url}`)}` : c.gray("not running in the background"),
+  );
+  row(
+    "at login",
+    login.installed ? `${login.healthy ? c.green("yes") : c.yellow("yes, but broken")} ${c.gray(`(${login.label})`)}` : c.gray("no"),
+  );
+  if (login.missing.length) {
+    say(`           ${c.yellow(`the entry points at a ${login.missing.join(" and ")} that no longer exists`)}`);
+    say(`           ${c.gray("run `llm-failover-proxy enable` to write it again with the current paths")}`);
+  }
+
+  say("");
+  if (!onPath) say(`  ${c.yellow("the proxy runs, but the command needs a PATH entry")} ${c.gray("— the fix is above")}`);
+  else if (missingKeys.length) say(`  ${c.yellow(`no API key for ${missingKeys.join(", ")}`)} ${c.gray(`— add them to ${envFile}`)}`);
+  else if (!service.running) say(`  ${c.gray("ready, but nothing is serving")} ${c.gray("— `llm-failover-proxy enable` puts it in the background")}`);
+  else say(`  ${c.green("ready")} ${c.gray(`— clients point at ${service.url}/v1`)}`);
+  say("");
+
+  if (!onPath) process.exitCode = 1;
+}
+
+/* ------------------------------------------------------------------ *
  * Interactive UI                                                      *
  * ------------------------------------------------------------------ */
+
+/**
+ * No terminal: the menus cannot run, so the command reports instead of doing
+ * nothing. What it prints is what a script, a CI job or `llmfp > log` gets, and
+ * it has to exit rather than wait for a keypress. A first run has nothing to
+ * report yet, so it gets the three steps that need no menu at all.
+ */
+export async function showHeadless({ configFile } = {}) {
+  const file = configFile ?? configPath();
+  say("");
+  say(`  ${c.gray("no terminal attached, so here is the report instead of the menus")}`);
+
+  if (!configExists(file)) {
+    say("");
+    say(`  ${c.yellow("nothing configured yet")} ${c.gray("— everything below works without a terminal:")}`);
+    say(`  ${c.gray("1.")} ${c.cyan("llm-failover-proxy start")}   ${c.gray(`writes the default chain to ${file}`)}`);
+    say(`  ${c.gray("2.")} ${c.gray("add one key per provider to")} ${envPathFor(file)} ${c.gray("(see .env.example)")}`);
+    say(`  ${c.gray("3.")} ${c.cyan("llm-failover-proxy enable")}  ${c.gray("runs it in the background, now and at every login")}`);
+    say("");
+    return;
+  }
+
+  await showStatus(loadConfig(file));
+  say(`  ${c.gray("keys go in the .env above; `doctor` checks the install, `stats --json` feeds a script")}`);
+  say("");
+}
 
 /**
  * Opens the terminal UI, then honours what the user picked there, starting
@@ -246,8 +392,7 @@ export async function showStats(config, { json = false } = {}) {
  */
 export async function openInterface({ configFile, view } = {}) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    say(c.yellow("The interactive UI needs a terminal."));
-    say(c.gray("  Use `llm-failover-proxy start` to run the proxy, or `... status` for a report."));
+    await showHeadless({ configFile });
     return;
   }
 

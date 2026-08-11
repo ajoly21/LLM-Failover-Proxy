@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { describeKey } from "../../config.js";
 import { probeProvider, probeTimeout } from "../../probe.js";
 import { h } from "../h.js";
+import { useLayout } from "../size.js";
 import { COLOR, SYMBOL, duration } from "../theme.js";
 import { Frame, Hints, Table } from "../widgets.js";
 
@@ -15,6 +16,7 @@ export function ProvidersScreen({ config, update, notify, navigate, onBack }) {
   const [confirming, setConfirming] = useState(false);
   const [tests, setTests] = useState({});
   const runRef = useRef(0);
+  const layout = useLayout();
 
   useEffect(
     () => () => {
@@ -72,13 +74,16 @@ export function ProvidersScreen({ config, update, notify, navigate, onBack }) {
     else if (input === "t") runTests();
   });
 
+  // The URL shortens before anything is dropped; the protocol goes first, then
+  // the URL entirely. Whether a key resolves is the one thing worth the width.
   const columns = [
     { key: "name", label: "NAME" },
-    { key: "type", label: "PROTOCOL" },
-    { key: "baseUrl", label: "BASE URL" },
+    { key: "type", label: "PROTOCOL", drop: 3 },
+    { key: "baseUrl", label: "BASE URL", flex: true, min: 14, drop: 2 },
     {
       key: "apiKey",
       label: "API KEY",
+      drop: 1,
       text: (row) => describeKey(row.apiKey).text,
       color: (row) => KEY_COLOR[describeKey(row.apiKey).state],
     },
@@ -116,7 +121,13 @@ export function ProvidersScreen({ config, update, notify, navigate, onBack }) {
         ],
       }),
     },
-    h(Box, { paddingTop: 1, flexDirection: "column" }, h(Table, { columns, rows, cursor, empty: "no provider yet, press a to add one" })),
+    h(
+      Box,
+      { paddingTop: 1, flexDirection: "column" },
+      // Reserved: frame, title, hints, the detail line, the blank rows, plus the
+      // line the hints take when they wrap on a narrow terminal.
+      h(Table, { columns, rows, cursor, maxRows: layout.listRows(layout.narrow ? 12 : 10), empty: "no provider yet, press a to add one" }),
+    ),
     h(
       Box,
       { minHeight: 2, paddingTop: 1, flexDirection: "column" },

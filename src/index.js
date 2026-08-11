@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import { applyCatalog, loadCatalog } from "./catalog.js";
-import { openInterface, showStats, showStatus } from "./cli.js";
+import { openInterface, showDoctor, showStats, showStatus } from "./cli.js";
 import { DEFAULT_PORT, configExists, configPath, loadConfig, migrateKeys, resolveSecret, saveConfig } from "./config.js";
 import { installAutostart, logPathFor, logTail, orphaned, removeAutostart, removeServiceCopy, restartDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
+import { packageVersion } from "./install.js";
 import { c, log } from "./logger.js";
 import { startServer } from "./server.js";
 import { flushStats } from "./state.js";
@@ -28,6 +28,7 @@ const HELP = `
     status          configuration, failover order, counters, service state
     stats           just the counters table, then back to the shell (--json to pipe it)
     logs            show the end of the background log
+    doctor          check this install: PATH, paths in the login entry, keys, service
     migrate         move keys out of the configuration file into the .env
     help, version
 
@@ -37,7 +38,12 @@ const HELP = `
     --port <n>       listen port (default: ${DEFAULT_PORT}; a free port is picked if taken)
     --host <addr>    listen address (default: 127.0.0.1)
     --lines <n>      how many log lines ${c.gray("(logs, default 40)")}
-    --json           machine-readable output ${c.gray("(stats)")}
+    --json           machine-readable output ${c.gray("(stats, doctor)")}
+    --path           only the PATH check ${c.gray("(doctor; what the installer runs)")}
+
+  ${c.bold("Without a terminal")}
+    Every command above works in a pipe, a script or a cron job, and none of them
+    needs the UI. ${c.bold("doctor")} exits non-zero when the command is not on PATH.
 
   ${c.bold("Keys")}
     API keys live in a ${c.bold(".env")} next to the configuration file, never inside it.
@@ -51,7 +57,7 @@ const HELP = `
 `;
 
 function parseArgs(argv) {
-  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false };
+  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--config" || arg === "-c") options.configFile = argv[++i];
@@ -60,6 +66,7 @@ function parseArgs(argv) {
     else if (arg === "--lines" || arg === "-n") options.lines = Number(argv[++i]) || 40;
     else if (arg === "--daemon" || arg === "--background" || arg === "-d") options.daemon = true;
     else if (arg === "--json") options.json = true;
+    else if (arg === "--path") options.pathOnly = true;
     else if (arg === "--help" || arg === "-h") options.command = "help";
     else if (arg === "--version" || arg === "-v") options.command = "version";
     else if (!arg.startsWith("-") && !options.command) options.command = arg;
@@ -131,9 +138,7 @@ async function main() {
     }
 
     case "version": {
-      // Read rather than import: JSON import attributes are not available on every supported Node.
-      const pkg = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-      process.stdout.write(`${pkg.version}\n`);
+      process.stdout.write(`${packageVersion()}\n`);
       return;
     }
 
@@ -201,8 +206,12 @@ async function main() {
       ensureConfig(options.configFile);
       say("");
       const entry = installAutostart({ configFile: options.configFile });
-      if (entry.installed) say(`  ${c.green("starts at login")} ${c.gray(`(${entry.label}: ${entry.file})`)}`);
-      else {
+      if (entry.installed) {
+        say(`  ${c.green("starts at login")} ${c.gray(`(${entry.label}: ${entry.file})`)}`);
+        // Writing the file is not the same as the service manager accepting it,
+        // and the difference only shows up at the next login, too late to be useful.
+        if (!entry.activated) say(`  ${c.yellow("the service manager did not take it")} ${c.gray(`— ${entry.hint}`)}`);
+      } else {
         say(`  ${c.red("could not register the login entry")}: ${entry.error}`);
         process.exitCode = 1;
       }
@@ -246,6 +255,12 @@ async function main() {
     case "stats":
     case "counters": {
       await showStats(loadConfig(options.configFile), { json: options.json });
+      return;
+    }
+
+    case "doctor":
+    case "check": {
+      showDoctor(loadConfig(options.configFile), { json: options.json, pathOnly: options.pathOnly });
       return;
     }
 
