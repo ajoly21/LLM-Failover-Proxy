@@ -86,6 +86,23 @@ test("nothing machine-specific can leave this machine", async () => {
   }
 });
 
+test("the installer leaves nothing behind when there is no console to write to", async () => {
+  // It writes its advice straight to the terminal, because npm hides what an
+  // install script prints. Asking Windows for `CONOUT$` the obvious way creates a
+  // *file* with that name when no console is attached: the message goes nowhere
+  // and the working directory — inside node_modules, during an install — keeps
+  // the litter. Run from a source checkout it exits at once, which is enough to
+  // prove the console was probed before anything else happened.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-postinstall-"));
+  try {
+    const { stdout } = await run(process.execPath, [path.join(ROOT, "scripts", "postinstall.js")], { env, cwd: dir });
+    assert.equal(stdout, "", "a checkout installing its own dependencies is left alone");
+    assert.deepEqual(await fs.readdir(dir), [], "no CONOUT$, no stray file of any name");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the bundled text commands work", options, async () => {
   await withConfig(async (file) => {
     const version = await run(process.execPath, [BUNDLE, "--version"], { env });

@@ -21,13 +21,27 @@ const cli = path.join(packageDir, "dist", "index.js");
  * writing to it directly is what makes install-time advice visible at all.
  * No terminal (CI, a GUI installer, a Dockerfile) means nothing to say anything
  * to, and the pipe npm gave us is the right fallback.
+ *
+ * Opened write-only and *without* `O_CREAT`: `"w"` would ask Windows to create a
+ * file literally called `CONOUT$` in the working directory when no console is
+ * attached, which both loses the message and litters the directory. The stat is
+ * the belt to that braces — what we are holding has to be a terminal.
  */
 const terminal = (() => {
+  const target = process.platform === "win32" ? "CONOUT$" : "/dev/tty";
+  let fd = null;
   try {
-    return fs.openSync(process.platform === "win32" ? "CONOUT$" : "/dev/tty", "w");
+    fd = fs.openSync(target, fs.constants.O_WRONLY);
+    if (fs.fstatSync(fd).isCharacterDevice()) return fd;
   } catch {
-    return null;
+    return null; // no console here, and nothing was created trying to find out
   }
+  try {
+    fs.closeSync(fd);
+  } catch {
+    /* already gone */
+  }
+  return null;
 })();
 
 const say = (text) => {
