@@ -166,19 +166,53 @@ test("a version-managed node is recognised, because login entries hard-code it",
   assert.equal(nodeManager("C:\\Program Files\\nodejs\\node.exe"), null);
 });
 
+/** A manifest exists only where a real project would have one. */
+const manifests = (...roots) => {
+  const wanted = new Set(roots);
+  return (file) => wanted.has(file);
+};
+
 // Native separators only: `path.relative` cannot compare a Windows path on Linux.
 test("how the copy got here decides what advice makes sense", { skip: process.platform === "win32" ? "POSIX layout" : false }, () => {
-  const posix = { platform: "linux", env: { npm_config_global_prefix: "/usr/local" }, execPath: "/usr/local/bin/node" };
+  const posix = { platform: "linux", env: { npm_config_global_prefix: "/usr/local" }, execPath: "/usr/local/bin/node", exists: manifests("/home/u/app/package.json") };
   assert.equal(installScope({ ...posix, entry: "/usr/local/lib/node_modules/llm-failover-proxy/dist/index.js" }), "global");
   assert.equal(installScope({ ...posix, entry: "/home/u/app/node_modules/llm-failover-proxy/dist/index.js" }), "local");
   assert.equal(installScope({ ...posix, entry: "/home/u/checkout/src/index.js" }), "source");
 });
 
 test("the same three cases, with the Windows layout", { skip: process.platform === "win32" ? false : "Windows layout" }, () => {
-  const windows = { platform: "win32", env: { npm_config_global_prefix: "C:\\np" }, execPath: "C:\\Program Files\\nodejs\\node.exe" };
+  const windows = {
+    platform: "win32",
+    env: { npm_config_global_prefix: "C:\\np" },
+    execPath: "C:\\Program Files\\nodejs\\node.exe",
+    exists: manifests("C:\\app\\package.json"),
+  };
   assert.equal(installScope({ ...windows, entry: "C:\\np\\node_modules\\llm-failover-proxy\\dist\\index.js" }), "global");
   assert.equal(installScope({ ...windows, entry: "C:\\app\\node_modules\\llm-failover-proxy\\dist\\index.js" }), "local");
   assert.equal(installScope({ ...windows, entry: "C:\\checkout\\src\\index.js" }), "source");
+});
+
+// Runs everywhere: none of these paths is ever inside a guessed root, so the
+// answer comes from the manifest test, which does not care whose separators
+// these are. The point is to guard the regression on any machine, not one OS.
+test("a global install under a prefix nobody could guess is still a global install", () => {
+  // What `npm_config_global_prefix` is worth outside an npm script: nothing. All
+  // that is left is where node lives, and on a server that is rarely the prefix
+  // the package went to. Reading those as project dependencies is what stopped
+  // the UI from offering the update on a machine that could perfectly well take
+  // it — the symptom being a "new version available" notice and no way to act.
+  const server = { platform: "linux", env: {}, execPath: "/usr/bin/node", exists: manifests("/srv/app/package.json") };
+  const layouts = [
+    ["a prefix set to avoid sudo", "/home/deploy/.npm-global/lib/node_modules/llm-failover-proxy/dist/index.js"],
+    ["nvm, node on PATH being another version", "/home/deploy/.nvm/versions/node/v20.11.0/lib/node_modules/llm-failover-proxy/dist/index.js"],
+    ["pnpm's global store", "/home/deploy/.local/share/pnpm/global/5/node_modules/llm-failover-proxy/dist/index.js"],
+  ];
+  for (const [label, entry] of layouts) assert.equal(installScope({ ...server, entry }), "global", label);
+
+  // And the distinction still holds where it matters.
+  assert.equal(installScope({ ...server, entry: "/srv/app/node_modules/llm-failover-proxy/dist/index.js" }), "local", "a manifest beside node_modules means a project");
+  assert.equal(installScope({ ...server, entry: "/srv/app/node_modules/some-tool/node_modules/llm-failover-proxy/dist/index.js" }), "local", "nested, still that project's");
+  assert.equal(installScope({ ...server, entry: "/home/deploy/src/proxy/src/index.js" }), "source");
 });
 
 /* ------------------------------------------------------------------ *

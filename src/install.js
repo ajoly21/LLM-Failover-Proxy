@@ -125,15 +125,41 @@ function globalRoots(options = {}) {
 }
 
 /**
+ * The project a `node_modules` in this path belongs to, if there is one.
+ *
+ * A manifest sitting beside the `node_modules` that holds us is what tells an
+ * application's dependency apart from a package manager's global store, which
+ * has no manifest of its own. Walks outwards, because a nested `node_modules`
+ * still belongs to the project above it.
+ */
+function projectAbove(entry, exists = fs.existsSync) {
+  const separator = entry.includes("\\") ? "\\" : "/";
+  const parts = entry.split(/[\\/]/);
+  for (let at = parts.lastIndexOf("node_modules"); at > 0; at = parts.lastIndexOf("node_modules", at - 1)) {
+    const root = parts.slice(0, at).join(separator);
+    if (root && exists(`${root}${separator}package.json`)) return root;
+  }
+  return null;
+}
+
+/**
  * How this copy got here, because the advice differs:
  *   global — `npm i -g`, the command should be on PATH
  *   local  — a project dependency, the command only exists inside npm scripts
  *   source — a checkout or `npm link`, whatever the developer wired up
+ *
+ * The prefixes above are guesses: `npm_config_global_prefix` is only set inside
+ * an npm script, so outside one all we have is where node itself lives. That
+ * misses every install whose prefix is somewhere else — a user-level prefix set
+ * to avoid sudo, pnpm's global store, or nvm once the node on PATH is a
+ * different version than the one that installed this. Those are global installs
+ * too, and the manifest test is what recognises them.
  */
 export function installScope(options = {}) {
   const entry = options.entry ?? CLI_ENTRY;
+  if (!entry.split(/[\\/]/).includes("node_modules")) return "source";
   if (globalRoots(options).some((root) => within(entry, root))) return "global";
-  return entry.split(/[\\/]/).includes("node_modules") ? "local" : "source";
+  return projectAbove(entry, options.exists) ? "local" : "global";
 }
 
 /**

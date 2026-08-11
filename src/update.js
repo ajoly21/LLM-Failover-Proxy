@@ -105,9 +105,15 @@ export async function checkForUpdate({
   fetchLatest = latestVersion,
   timeoutMs,
 } = {}) {
-  // Only a global install can be replaced by a global install: from a checkout
-  // or an `npm link`, installing the release would swap the copy being run.
-  const installable = installScope() === "global";
+  // A checkout is the one place `npm i -g` must not be offered: it would install
+  // beside the copy being worked on and shadow it. Everything a package manager
+  // put here can be replaced, so anything else is offered.
+  //
+  // Deliberately not `=== "global"`. A prefix this cannot guess used to be read
+  // as a project dependency, which hid the update entirely — leaving someone on
+  // an old version with no way forward from the UI, the one failure worth
+  // avoiding even at the cost of offering it where it is merely useless.
+  const installable = installScope() !== "source";
   const idle = { current, latest: null, available: false, checked: false, installable };
   if (checkDisabled(config)) return { ...idle, disabled: true };
 
