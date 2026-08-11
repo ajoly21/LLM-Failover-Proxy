@@ -1,6 +1,6 @@
 {
   "name": "llm-failover-proxy",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "OpenAI-compatible LLM proxy with automatic provider failover, streaming support, and a terminal UI to manage providers, models and priority order.",
   "keywords": [
     "llm",
