@@ -64,7 +64,7 @@ export function ProviderForm({ config, providerId, update, notify, onDone }) {
       subtitle: 'pick a preset, or "custom" to type everything',
       items: PRESETS.map((entry) => ({
         key: entry.key,
-        label: entry.name || "custom",
+        label: entry.label || entry.name || "custom",
         hint: entry.baseUrl || "URL to enter",
         preset: entry,
       })),

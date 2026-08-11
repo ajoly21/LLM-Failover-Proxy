@@ -35,12 +35,13 @@
   ],
   "models": [
     { "provider": "nvidia", "model": "z-ai/glm-5.2" },
-    { "provider": "opencode", "model": "laguna-s-2.1-free" },
-    { "provider": "nvidia", "model": "deepseek-ai/deepseek-v4-pro" },
-    { "provider": "nvidia", "model": "minimaxai/minimax-m3" },
+    { "provider": "nvidia", "model": "nvidia/nemotron-3-super-120b-a12b" },
     { "provider": "opencode", "model": "big-pickle" },
+    { "provider": "nvidia", "model": "minimaxai/minimax-m3" },
     { "provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free" },
     { "provider": "opencode", "model": "deepseek-v4-flash-free" },
+    { "provider": "opencode", "model": "laguna-s-2.1-free" },
+    { "provider": "nvidia", "model": "openai/gpt-oss-120b" },
     { "provider": "nvidia", "model": "stepfun-ai/step-3.7-flash" },
     { "provider": "opencode", "model": "mimo-v2.5-free" },
     { "provider": "opencode", "model": "ling-3.0-flash-free" }

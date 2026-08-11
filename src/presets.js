@@ -1,5 +1,13 @@
-/** Well-known providers offered by the CLI. `type` is the upstream protocol. */
+/**
+ * Well-known providers offered by the CLI. `type` is the upstream protocol,
+ * `label` an optional display name when the vendor calls its endpoint something
+ * the provider name does not say. The first entries are the ones the default
+ * chain is built on, so they stay at the top of the picker.
+ */
 export const PRESETS = [
+  { key: 'nvidia', name: 'nvidia', label: 'nvidia-nim', type: 'openai', baseUrl: 'https://integrate.api.nvidia.com/v1', env: 'NVIDIA_API_KEY', sample: 'z-ai/glm-5.2' },
+  { key: 'opencode', name: 'opencode', label: 'opencode-zen', type: 'openai', baseUrl: 'https://opencode.ai/zen/v1', env: 'OPENCODE_API_KEY', sample: 'laguna-s-2.1-free' },
+  { key: 'opencode-go', name: 'opencode-go', label: 'opencode-go', type: 'openai', baseUrl: 'https://opencode.ai/zen/go/v1', env: 'OPENCODE_GO_API_KEY', sample: 'laguna-s-2.1-free' },
   { key: 'openai', name: 'openai', type: 'openai', baseUrl: 'https://api.openai.com/v1', env: 'OPENAI_API_KEY', sample: 'gpt-4o-mini' },
   { key: 'anthropic', name: 'anthropic', type: 'anthropic', baseUrl: 'https://api.anthropic.com/v1', env: 'ANTHROPIC_API_KEY', sample: 'claude-sonnet-4-5' },
   { key: 'openrouter', name: 'openrouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', env: 'OPENROUTER_API_KEY', sample: 'meta-llama/llama-3.3-70b-instruct' },
