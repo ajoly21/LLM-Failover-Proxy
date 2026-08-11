@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, saveConfig } from "../src/config.js";
+import { loadConfig, moveModel, saveConfig } from "../src/config.js";
 import { resetEnvCache } from "../src/env.js";
 import { startServer, watchPath } from "../src/server.js";
 
@@ -77,5 +77,86 @@ test("a key pasted after startup is picked up, even under an aliased path", asyn
     await new Promise((resolve) => app.server.close(resolve));
     resetEnvCache();
     await fs.rm(box.root, { recursive: true, force: true });
+  }
+});
+
+test("a request is answered with the file on disk, even with the watcher dead", async () => {
+  // The guarantee that does not depend on the OS volunteering anything: closing
+  // the watcher is exactly what a filesystem reporting no events looks like — a
+  // network share, a bind mount inside a container. The chain still has to be the
+  // one on disk, because the person who just reordered it has no way to tell.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-nowatch-"));
+  const file = path.join(dir, "config.json");
+  const model = (n) => ({ id: `mdl_${n}`, providerId: "prov_1", model: `m-${n}`, alias: `a${n}`, kind: "chat", enabled: true, params: {} });
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      server: { host: "127.0.0.1", port: 0, logLevel: "error" },
+      providers: [{ id: "prov_1", name: "p", type: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKey: null, headers: {}, enabled: true }],
+      models: [model(1), model(2)],
+    }),
+  );
+
+  const app = await startServer({ configFile: file, statsFile: null });
+  const { port } = app.server.address();
+  try {
+    // Every watcher this server installed, silenced.
+    app.server.emit("close");
+
+    for (const [first, second] of [
+      ["m-2", "m-1"],
+      ["m-1", "m-2"],
+    ]) {
+      const config = loadConfig(file);
+      assert.equal(moveModel(config, 0, 1), true);
+      saveConfig(config, file);
+      assert.equal(config.models[0].model, first, "the file now leads with this");
+
+      const answer = await fetch(`http://127.0.0.1:${port}/v1/models`).then((response) => response.json());
+      const order = answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+      assert.deepEqual(order, [`a${first.slice(-1)}`, `a${second.slice(-1)}`], "the request read the file, not a stale copy");
+    }
+  } finally {
+    app.server.closeAllConnections?.();
+    await new Promise((resolve) => app.server.close(resolve));
+    resetEnvCache();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("every save is picked up, not just the first one", async () => {
+  // `saveConfig` renames a temporary file over the target. A watch placed on the
+  // file itself follows the inode, so on Linux the rename is reported once and
+  // every save after it is lost: reordering the chain twice would take effect
+  // once, and the only way out would be restarting the daemon. Watching the
+  // directory is what survives — and one save can never prove it.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-resave-"));
+  const file = path.join(dir, "config.json");
+  const model = (n) => ({ id: `mdl_${n}`, providerId: "prov_1", model: `m-${n}`, alias: `a${n}`, kind: "chat", enabled: true, params: {} });
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      server: { host: "127.0.0.1", port: 0, logLevel: "error" },
+      providers: [{ id: "prov_1", name: "p", type: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKey: null, headers: {}, enabled: true }],
+      models: [model(1), model(2), model(3)],
+    }),
+  );
+
+  const app = await startServer({ configFile: file, statsFile: null });
+  const order = () => app.config.models.map((entry) => entry.model).join(",");
+  try {
+    assert.equal(order(), "m-1,m-2,m-3");
+    for (let round = 1; round <= 3; round += 1) {
+      const config = loadConfig(file);
+      assert.equal(moveModel(config, 0, 1), true);
+      saveConfig(config, file);
+      const wanted = config.models.map((entry) => entry.model).join(",");
+      assert.ok(await waitFor(() => order() === wanted), `reorder ${round} of 3 never reached the running proxy`);
+    }
+  } finally {
+    app.server.closeAllConnections?.();
+    await new Promise((resolve) => app.server.close(resolve));
+    resetEnvCache();
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

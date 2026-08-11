@@ -38,6 +38,23 @@ export function watchPath(target) {
   }
 }
 
+/**
+ * "Is this still the same file as last time", for the price of one stat.
+ *
+ * `fs.watch` is the OS volunteering to tell us, and it does not always volunteer:
+ * a network share or a container bind mount may report nothing at all. Comparing
+ * the file's own timestamp and size costs no read and no parse, and asks nobody
+ * for a favour. `null` when the file is gone, which is a change like any other.
+ */
+export function fingerprint(file) {
+  try {
+    const info = fs.statSync(file);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Compact, locale-independent timestamp: `2026-07-31 09:41`. */
 const isoMinutes = (value) => new Date(value).toISOString().replace("T", " ").slice(0, 16);
 
@@ -146,11 +163,12 @@ function createSink(res, config) {
 
 /** The last answered requests, named: ids mean nothing to a reader. */
 function recentPayload(config) {
-  return recentCalls().map(({ id, at }) => {
+  return recentCalls().map(({ id, at, ttftMs }) => {
     const entry = config.models.find((model) => model.id === id);
     return {
       id,
       at,
+      ttftMs: ttftMs ?? null,
       provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
       model: entry?.model ?? null,
       alias: entry?.alias ?? null,
@@ -215,9 +233,15 @@ export function createServer({ configFile, statsFile } = {}) {
     knownIds: new Set(config.models.map((entry) => entry.id)),
   });
 
+  // Both files are also checked when a request arrives, so `stamp` has to be
+  // refreshed here too or the watcher's reload would be repeated once more.
+  let configStamp = fingerprint(config.__file);
+  let envStamp = fingerprint(envPathFor(config.__file));
+
   const reload = (why) => {
     try {
       config = loadConfig(configFile);
+      configStamp = fingerprint(config.__file);
       setLogLevel(config.server.logLevel);
       log.info(c.cyan("config reloaded"), c.gray(`(${why})`), `— ${config.models.length} model(s), ${config.providers.length} provider(s)`);
     } catch (err) {
@@ -225,7 +249,27 @@ export function createServer({ configFile, statsFile } = {}) {
     }
   };
 
+  const reloadKeys = (why) => {
+    const envFile = envPathFor(config.__file);
+    envStamp = fingerprint(envFile);
+    const { keys } = loadEnvFiles({ configFile: config.__file });
+    log.info(c.cyan("keys reloaded"), c.gray(`(${why})`), `— ${keys.length} variable(s)`);
+  };
+
+  /**
+   * What the watcher cannot promise: that this request is answered with what is
+   * on disk. A missed event, or a filesystem that reports none, and the chain in
+   * memory stays quietly the old one — while the person who just reordered it has
+   * no way to tell. One stat per file per request, and a read only when something
+   * actually changed, which for a configuration is close to never.
+   */
+  const refresh = () => {
+    if (fingerprint(config.__file) !== configStamp) reload("file changed");
+    if (fingerprint(envPathFor(config.__file)) !== envStamp) reloadKeys("file changed");
+  };
+
   const server = http.createServer(async (req, res) => {
+    refresh();
     const requestId = crypto.randomBytes(3).toString("hex");
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     const route = url.pathname.replace(/\/+$/, "") || "/";
@@ -376,6 +420,7 @@ export function createServer({ configFile, statsFile } = {}) {
       return config;
     },
     reload,
+    reloadKeys,
   };
 }
 
@@ -429,34 +474,39 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   }
   log.raw("");
 
-  // Hot reload when the CLI rewrites the config.
-  let debounce = null;
-  try {
-    const watcher = fs.watch(watchPath(config.__file), () => {
-      clearTimeout(debounce);
-      debounce = setTimeout(() => app.reload("file changed"), 250);
-    });
-    app.server.once("close", () => watcher.close());
-  } catch {
-    log.debug("config file watching unavailable");
-  }
-
-  // Same for the keys: a background service is started long before the user
-  // pastes a key, so the `.env` next to the config is watched as well.
-  let envDebounce = null;
+  // Every request already checks both files, so nothing here is what makes a
+  // change take effect — this only makes it take effect *now* rather than on the
+  // next request, which is what an idle proxy and a live log need.
+  //
+  // The *directory* is watched, never the two files. `saveConfig` writes a
+  // temporary file and renames it over the target, and on Linux a watch placed on
+  // a file follows the inode: the rename reports once, then the watch is left on
+  // the replaced inode and every later save is lost in silence.
   const envFile = envPathFor(config.__file);
+  const configName = path.basename(config.__file);
+  const envName = path.basename(envFile);
+  /** Collapses the burst a single save produces into one reload. */
+  const debounced = (run) => {
+    let timer = null;
+    return () => {
+      clearTimeout(timer);
+      timer = setTimeout(run, 250);
+    };
+  };
+  const reloadConfig = debounced(() => app.reload("file changed"));
+  const reloadKeys = debounced(() => app.reloadKeys(envFile));
   try {
-    const watcher = fs.watch(watchPath(path.dirname(envFile)), (_event, name) => {
-      if (name && path.basename(name) !== path.basename(envFile)) return;
-      clearTimeout(envDebounce);
-      envDebounce = setTimeout(() => {
-        const { keys } = loadEnvFiles({ configFile: config.__file });
-        log.info(c.cyan("keys reloaded"), c.gray(`(${envFile})`), `— ${keys.length} variable(s)`);
-      }, 250);
+    const watcher = fs.watch(watchPath(path.dirname(config.__file)), (_event, name) => {
+      // The temporary file a save goes through, the stats and the log all live
+      // here too; only these two are worth acting on. A platform that reports no
+      // name at all leaves us guessing, so both run.
+      const changed = name ? path.basename(name) : null;
+      if (!changed || changed === configName) reloadConfig();
+      if (!changed || changed === envName) reloadKeys();
     });
     app.server.once("close", () => watcher.close());
   } catch {
-    log.debug(".env watching unavailable");
+    log.debug("config watching unavailable");
   }
 
   // Lets `status`, `stop` and the login entry find this instance and its port.
