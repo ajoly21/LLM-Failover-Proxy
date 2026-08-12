@@ -15,6 +15,14 @@ Needs [Node.js](https://nodejs.org) 22 or newer. Downloads **one package, ~190 k
 
 ---
 
+## Why this exists
+
+**Some of the best models around are free.** Providers hand out real free tiers — NVIDIA NIM, OpenRouter, opencode, Groq, Gemini — and a few of them serve frontier-grade models at no cost. The catch is that a free tier is never quite there when you need it: quota already spent, rate limit hit after a handful of requests, endpoint saturated at peak hours, model retired overnight, or a very long wait before the first token. Great model, unreliable access.
+
+So a single free key cannot be _the_ backend of an app. A dozen of them, put in order, can. That is the whole idea: **you rank the models by preference, and the proxy answers with the best one that is actually reachable right now.** Your first choice is tried first on every request; when it is out of quota, benched or silent, the next one answers and your app never learns that anything happened. Ten free tiers behind one address behave like one endpoint that is always up — and you get to spend all of them, instead of exhausting one and waiting for the reset.
+
+**It is meant for free models in particular, and the racing is why.** When your favourite model has not started answering after 5 seconds, the next one is asked in parallel and the first usable answer wins. That costs tokens twice — a price worth paying precisely when the tokens are free. The same trick that would be wasteful on a metered key is what makes a pile of free ones feel fast, and it stays adjustable (`hedgeDelayMs`, `maxInFlight`) for the day you point the chain at something you pay for.
+
 ## Install
 
 ```bash
