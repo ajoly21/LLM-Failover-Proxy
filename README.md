@@ -9,9 +9,12 @@ Slow counts as broken too: if your favourite model has not started answering aft
 ```bash
 npm i -g llm-failover-proxy      # installs it, starts it, keeps it running
 llm-failover-proxy               # paste your API keys
+llmfp                            # …or type this instead, it is the same command
 ```
 
 Needs [Node.js](https://nodejs.org) 22 or newer. Downloads **one package, ~190 kB**, no dependency tree.
+
+`llmfp` is a shorter alias for `llm-failover-proxy`: both names are installed, they point at the same file, and **every command in this README works with either one.** The long name is used below because it says what it is; `llmfp status`, `llmfp stats`, `llmfp doctor` are what you will actually type.
 
 ---
 
@@ -181,8 +184,11 @@ Every answer says who served it, in the response headers: `x-llm-proxy-provider`
 
 ## Manage it
 
+Both names do the same thing, on every line below: **`llm-failover-proxy`, or `llmfp` for short.**
+
 ```
 llm-failover-proxy              open the terminal UI
+llmfp                           exactly the same, and so for every command below
 llm-failover-proxy setup        run the setup wizard again
 llm-failover-proxy status       what is configured, what is running, live counters
 llm-failover-proxy stats        just the counters table, then back to the shell
@@ -196,7 +202,7 @@ llm-failover-proxy start -d     run in the background
 llm-failover-proxy doctor       is this install usable from any shell?
 ```
 
-`llmfp` is a shorter alias for the same command. Add `--config <path>` to work on another configuration, `--port`/`--host` to change where it listens.
+Add `--config <path>` to work on another configuration, `--port`/`--host` to change where it listens. Both apply whichever of the two names you typed.
 
 **None of these needs a terminal.** Piped, scripted, or run from a cron job, every command prints plain text and exits — including `llmfp` on its own, which reports instead of opening the menus when there is nothing to draw on. `doctor` exits non-zero when the command is not on `PATH`, so an install script can branch on it, and `doctor --json` / `stats --json` give the same facts as machine-readable output.
 
