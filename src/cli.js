@@ -36,8 +36,11 @@ const pad = (text, width) => `${text}${" ".repeat(Math.max(0, width - stripAnsi(
 function table(headers, rows) {
   if (!rows.length) return;
   const widths = headers.map((header, index) => Math.max(stripAnsi(header).length, ...rows.map((row) => stripAnsi(String(row[index] ?? "")).length)));
-  say(`  ${headers.map((header, index) => c.gray(pad(header, widths[index]))).join("  ")}`);
-  for (const row of rows) say(`  ${row.map((cell, index) => pad(String(cell ?? ""), widths[index])).join("  ")}`);
+  // The last column is never padded: nothing lines up after it, and a column
+  // holding a sentence would otherwise trail spaces to the width of the longest.
+  const cell = (value, index) => (index === widths.length - 1 ? String(value ?? "") : pad(String(value ?? ""), widths[index]));
+  say(`  ${headers.map((header, index) => c.gray(cell(header, index))).join("  ")}`);
+  for (const row of rows) say(`  ${row.map(cell).join("  ")}`);
 }
 
 const yesNo = (value) => (value ? c.green("yes") : c.red("no"));
@@ -173,6 +176,10 @@ export function findTarget(targets, selector) {
  * The lists in this configuration, and which one the proxy serves. The `←→` of
  * the UI, for a shell: the numbers printed here are what `use` accepts, and the
  * order is the order the arrows cycle through.
+ *
+ * `WHEN TO USE` is what makes this report answer the question it is opened with —
+ * not "what lists are there" but "which one do I want now". A list nobody has
+ * described says so, and says which key writes it.
  */
 export function showLists(config, { json = false } = {}) {
   const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
@@ -180,6 +187,7 @@ export function showLists(config, { json = false } = {}) {
     index: index + 1,
     name: entry.name,
     active: entry.id === config.activeListId,
+    description: entry.description || "",
     // The active list mirrors `config.models`, so both read the same numbers.
     models: entry.models.length,
     enabled: entry.models.filter((model) => model.enabled).length,
@@ -196,12 +204,22 @@ export function showLists(config, { json = false } = {}) {
   if (!rows.length) say(c.gray("  (none)"));
   else {
     table(
-      ["#", "NAME", "MODELS", "ON", "ACTIVE"],
-      rows.map((row) => [row.index, row.active ? c.bold(row.name) : row.name, row.models, row.enabled, row.active ? c.green("yes") : c.gray("-")]),
+      ["#", "NAME", "MODELS", "ON", "ACTIVE", "WHEN TO USE"],
+      rows.map((row) => [
+        row.index,
+        row.active ? c.bold(row.name) : row.name,
+        row.models,
+        row.enabled,
+        row.active ? c.green("yes") : c.gray("-"),
+        row.description ? row.description : c.gray("-"),
+      ]),
     );
   }
   say("");
   say(`  ${c.gray("switch with")} ${c.cyan("llmfp use <name|index>")}   ${c.gray("· the chain itself is in")} ${c.cyan("llmfp status")}`);
+  if (rows.some((row) => !row.description)) {
+    say(`  ${c.gray("a list with no note is one you will have to open to understand — press")} ${c.cyan("w")} ${c.gray("on Models lists to write it")}`);
+  }
   say("");
 }
 
@@ -242,7 +260,20 @@ export function useList(config, selector, { json = false } = {}) {
 
   if (json) {
     process.stdout.write(
-      `${JSON.stringify({ ok: true, changed: !already, active: found.target.name, index: index + 1, total, models: config.models.length, enabled }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          ok: true,
+          changed: !already,
+          active: found.target.name,
+          description: found.target.description || "",
+          index: index + 1,
+          total,
+          models: config.models.length,
+          enabled,
+        },
+        null,
+        2,
+      )}\n`,
     );
     return;
   }
@@ -252,6 +283,9 @@ export function useList(config, selector, { json = false } = {}) {
     `  ${already ? c.gray("already serving") : c.green("now serving")} ${c.bold(found.target.name)} ` +
       `${c.gray(`(${index + 1}/${total})`)}   ${c.gray(`${config.models.length} model(s), ${enabled} enabled`)}`,
   );
+  // What this list is for, echoed back: the one line that says whether the switch
+  // was the one meant, which a name matched on a fragment cannot.
+  if (found.target.description) say(`  ${c.gray(found.target.description)}`);
   // Said only when there is something to reassure: the switch reached a proxy
   // that is already serving, and no restart is coming.
   const service = already ? null : daemonStatus(config.__file);

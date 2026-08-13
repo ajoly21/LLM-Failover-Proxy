@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { addTarget, loadConfig, saveConfig } from "../src/config.js";
+import { addTarget, describeTarget, loadConfig, saveConfig } from "../src/config.js";
 import { assemble, backend, postJson, startProxy } from "./helpers.js";
 import { startMock } from "./mock-provider.js";
 
@@ -123,7 +123,8 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
   const where = { configFile: proxy.file, cwd: proxy.dir };
   // A second list holding a chain of its own, exactly as the UI builds it.
   const seed = loadConfig(proxy.file);
-  addTarget(seed, "cheap-and-fast");
+  const second = addTarget(seed, "cheap-and-fast");
+  describeTarget(seed, second.id, "everyday work, nothing metered");
   seed.models.push({ id: "mdl_2", providerId: "prov_p", model: "m-2", alias: "a2", kind: "chat", enabled: true, params: {} });
   saveConfig(seed, proxy.file);
 
@@ -134,10 +135,12 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
 
   try {
     const listed = await cli(["lists"], where);
-    assert.match(listed.stdout, /#\s+NAME\s+MODELS\s+ON\s+ACTIVE/);
-    assert.match(listed.stdout, /1\s+default\s+1\s+1\s+-/, "the list that is not being served");
-    assert.match(listed.stdout, /2\s+cheap-and-fast\s+1\s+1\s+yes/, "and the one that is");
+    assert.match(listed.stdout, /#\s+NAME\s+MODELS\s+ON\s+ACTIVE\s+WHEN TO USE/);
+    assert.match(listed.stdout, /1\s+default\s+1\s+1\s+-\s+-/, "the list that is not being served, and has nothing to say for itself");
+    // What the report is opened for: not which lists exist, but which one to pick.
+    assert.match(listed.stdout, /2\s+cheap-and-fast\s+1\s+1\s+yes\s+everyday work, nothing metered/, "and the one that is");
     assert.match(listed.stdout, /llmfp use <name\|index>/, "and how to switch without the UI");
+    assert.match(listed.stdout, /press w on Models lists/, "a list with no note says which key writes one");
 
     assert.deepEqual(await served(), ["a2"], "the running proxy serves the active list");
 
@@ -148,9 +151,11 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
     assert.deepEqual(loadConfig(proxy.file).models.map((entry) => entry.model), ["m-1"], "the chain in the file is the one that was asked for");
     assert.deepEqual(await served(), ["a1"], "and the request that followed was answered from it");
 
-    // By part of a name, since that is what anyone types.
+    // By part of a name, since that is what anyone types. The note is echoed
+    // back, which is what says the fragment matched the list that was meant.
     const partial = await cli(["use", "cheap"], where);
     assert.match(partial.stdout, /now serving cheap-and-fast \(2\/2\)/);
+    assert.match(partial.stdout, /everyday work, nothing metered/);
     assert.deepEqual(await served(), ["a2"]);
 
     const again = await cli(["use", "cheap-and-fast"], where);
@@ -162,6 +167,11 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
     assert.deepEqual(
       asJson.lists.map((entry) => entry.name),
       ["default", "cheap-and-fast"],
+    );
+    assert.deepEqual(
+      asJson.lists.map((entry) => entry.description),
+      ["", "everyday work, nothing metered"],
+      "the note travels in the JSON too, so a script can show it in a picker",
     );
   } finally {
     await proxy.close();
