@@ -7,6 +7,7 @@ import {
   copyTarget,
   cycleTarget,
   deleteTarget,
+  describeTarget,
   getProvider,
   moveModel,
   providerLabel,
@@ -25,7 +26,7 @@ const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay));
 const STATE_COLOR = { ok: COLOR.ok, fail: COLOR.fail, running: COLOR.warn, queued: undefined };
 
 /** What the name being typed is for. */
-const PROMPT_LABEL = { new: "new", copy: "copy", rename: "rename" };
+const PROMPT_LABEL = { new: "new", copy: "copy", rename: "rename", describe: "when to use" };
 
 /**
  * The keys that act on the whole list, as `[keys, label]` pairs.
@@ -41,6 +42,7 @@ const listHints = (listCount, long) =>
     ["n", long ? "new list" : "new"],
     ["c", long ? "copy list" : "copy"],
     ["r", long ? "rename list" : "rename"],
+    ["w", long ? "when to use" : "when"],
     // Never the last one: something has to be served.
     listCount > 1 ? ["x", long ? "delete list" : "delete"] : null,
   ].filter(Boolean);
@@ -87,6 +89,14 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
 
   const saveName = () => {
     const name = prompt.value.trim();
+    // A note is the one thing here that may be emptied: clearing a note that no
+    // longer describes the chain is as useful as writing it was.
+    if (prompt.mode === "describe") {
+      update((draft) => describeTarget(draft, draft.activeListId, name));
+      notify(name ? "saved what this list is for" : "cleared the note");
+      setPrompt(null);
+      return;
+    }
     // Kept open rather than saved blank: two unnamed lists cannot be told apart.
     if (!name) return;
     if (prompt.mode === "rename") {
@@ -194,6 +204,8 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
     // of its own.
     else if (input === "c") setPrompt({ mode: "copy", value: `${list?.name ?? DEFAULT_TARGET_NAME} copy` });
     else if (input === "r") setPrompt({ mode: "rename", value: list?.name ?? "" });
+    // Prefilled with what is there, so a note is corrected rather than retyped.
+    else if (input === "w") setPrompt({ mode: "describe", value: list?.description ?? "" });
     else if (input === "x" && listCount > 1) setConfirming("list");
     else if (input === "m" && models.length > 1) setHolding(true);
     else if (input === "a") navigate({ name: "model-form" });
@@ -255,10 +267,15 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
         ["esc", "cancels"],
       ]
     : listKeys;
+  // What this list is for, on the line under its name — the question `←→` raises
+  // and a name alone cannot answer. Shown only once somebody has written it, so a
+  // list with nothing to say costs no row; while the note is being typed the field
+  // is on the name line, so the line below it would only repeat the old text.
+  const note = prompt ? "" : list?.description || "";
   // Rows this screen needs around the table: the frame, the title, the hints, the
-  // list bar and its blank line, the detail line. Both hint lines wrap on a
-  // narrow terminal — by one line more once `x delete list` has joined them.
-  const reserved = (holding ? 9 : 11) + (layout.short ? 1 : 3) + (layout.narrow ? (listCount > 1 ? 3 : 2) : 0);
+  // list bar and its blank line, the note, the detail line. Both hint lines wrap on
+  // a narrow terminal — by one line more once `x delete list` has joined them.
+  const reserved = (holding ? 9 : 11) + (layout.short ? 1 : 3) + (layout.narrow ? (listCount > 1 ? 3 : 2) : 0) + (note ? 1 : 0);
   const bar = h(
     Box,
     { flexDirection: "column", marginBottom: layout.short ? 0 : 1 },
@@ -271,7 +288,11 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
             Text,
             null,
             h(Text, { dimColor: true }, `${PROMPT_LABEL[prompt.mode]}: `),
-            h(TextField, { value: prompt.value, focused: true, placeholder: "name this list" }),
+            h(TextField, {
+              value: prompt.value,
+              focused: true,
+              placeholder: prompt.mode === "describe" ? "when should this list be the one serving?" : "name this list",
+            }),
           )
         : h(
             Text,
@@ -283,6 +304,9 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
             h(Text, { dimColor: true }, `  ${listIndex + 1}/${listCount}`),
           ),
     ),
+    // Truncated, never wrapped: it is one line by definition, and a note that
+    // wrapped would push a model off the screen to say something optional.
+    note ? h(Text, { dimColor: true, italic: true, wrap: "truncate" }, `  ${note}`) : null,
     // Drawn by the same widget as the hints under the frame, so a key looks the
     // same wherever it is written: the glyph in the accent colour, the words
     // around it dimmed.
@@ -300,7 +324,7 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
       footer: h(Hints, {
         items: prompt
           ? [
-              ["enter", "save the name"],
+              ["enter", prompt.mode === "describe" ? "save the note" : "save the name"],
               ["esc", "cancel"],
             ]
           : holding

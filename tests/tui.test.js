@@ -465,6 +465,54 @@ test('a second model list is added, named in place, and reached with the arrows'
   }
 });
 
+test('w says when a list should be the one serving, on the line under its name', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq')],
+    modelLists: [
+      { id: 'lst_a', name: 'free-only', description: 'everyday work, nothing metered', models: [model('first', 'groq')] },
+      { id: 'lst_b', name: 'paid-fallback', models: [model('second', 'groq')] },
+    ],
+    activeListId: 'lst_a',
+    view: { name: 'models' },
+  });
+  const note = () => app.config().modelLists.find((entry) => entry.name === 'free-only').description;
+  try {
+    // The question `←→` raises is answered where the switching happens, not a
+    // screen away: the note is under the name of the list it describes.
+    // Immediately under it: the next line of the frame, border characters aside.
+    assert.match(app.frame(), /list\s+‹ free-only ›\s+1\/2[^\n]*\n[^\n]*everyday work, nothing metered/);
+    assert.match(app.frame(), /w when to use/, 'and the key that writes it is offered beside it');
+
+    // A list nobody has described says nothing rather than making something up.
+    await app.press(KEY.right);
+    assert.match(app.frame(), /list\s+‹ paid-fallback ›/);
+    assert.doesNotMatch(app.frame(), /everyday work/, 'the note belongs to the list, not to the screen');
+
+    // Prefilled with what is there, so a note is corrected rather than retyped.
+    await app.press(KEY.left);
+    await app.press('w');
+    assert.match(app.frame(), /when to use: everyday work, nothing metered/);
+    await app.press(KEY.escape);
+    assert.equal(note(), 'everyday work, nothing metered', 'cancelled, so the note stands');
+
+    await app.press('w');
+    await app.type(' — free tiers first');
+    await app.press(KEY.enter);
+    assert.equal(note(), 'everyday work, nothing metered — free tiers first', 'saved on the list, in the file');
+    assert.match(app.frame(), /everyday work, nothing metered — free tiers first/);
+
+    // Emptied on purpose: a note that stopped being true is worse than none.
+    await app.press('w');
+    await app.press(KEY.backspace, 60);
+    await app.press(KEY.enter);
+    assert.equal(note(), '');
+    assert.doesNotMatch(app.frame(), /everyday work/, 'and the row it took is given back');
+  } finally {
+    await app.close();
+  }
+});
+
 test('c copies the list in use, and x deletes one', async () => {
   const app = await mount({
     providers: [provider('groq')],
