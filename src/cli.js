@@ -5,6 +5,7 @@ import {
   configExists,
   configPath,
   describeKey,
+  describeTarget,
   inlineKeys,
   loadConfig,
   providerLabel,
@@ -135,11 +136,17 @@ export async function showStatus(config) {
 }
 
 /* ------------------------------------------------------------------ *
- * Model lists without the UI: `lists` and `use`                      *
+ * Model lists without the UI: `lists`, `describe` and `use`           *
  * ------------------------------------------------------------------ */
 
 /** How lists are typed on a command line, and printed when one is not found. */
 const listMenu = (targets) => targets.map((entry, index) => `${index + 1}. ${entry.name}`).join("   ");
+
+/** The lists of a config, whatever shape the object is in. */
+const listsOf = (config) => (Array.isArray(config.modelLists) ? config.modelLists : []);
+
+/** A name as it has to be typed back: quoted only when it would not survive a shell. */
+const asArgument = (name) => (/^[A-Za-z0-9._-]+$/.test(name) ? name : `"${name}"`);
 
 /**
  * Which list a `use <name|index>` argument means.
@@ -182,7 +189,7 @@ export function findTarget(targets, selector) {
  * described says so, and says which key writes it.
  */
 export function showLists(config, { json = false } = {}) {
-  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
+  const targets = listsOf(config);
   const rows = targets.map((entry, index) => ({
     index: index + 1,
     name: entry.name,
@@ -223,6 +230,118 @@ export function showLists(config, { json = false } = {}) {
   say("");
 }
 
+/* ------------------------------------------------------------------ *
+ * `describe`: what each list is for, for whoever has to choose        *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Reads or writes what a list is for, by how many words it is given:
+ *
+ *   describe                        every list, its note, and the command to serve it
+ *   describe <name|index>           that list's note, on its own, ready to be piped
+ *   describe <name|index> <text>    says when that list should be the one serving
+ *   describe <name|index> ""        takes the note back
+ *
+ * The no-argument form is the one written for an agent rather than for a person:
+ * a name means nothing to something that did not build these chains, so the note
+ * is what it has to choose by, and the command that acts on the choice is printed
+ * under each one. It reads the same on a terminal, so there is one thing to learn.
+ */
+export function describeList(config, args = [], { json = false } = {}) {
+  const words = args.filter((word) => word !== undefined);
+  if (!words.length) return listPurposes(config, { json });
+
+  const found = findTarget(listsOf(config), words[0]);
+  if (found.error) {
+    refuse(found.error, listsOf(config), { json });
+    return;
+  }
+  // Two words in means the rest is the note, even when the rest is empty: that is
+  // how a note is taken back, and it has to be told apart from asking to read one.
+  if (words.length < 2) return readNote(found.target, { json });
+  return writeNote(config, found.target, words.slice(1).join(" "), { json });
+}
+
+/** Shared refusal: same message, same exit code, whichever form was used. */
+function refuse(error, targets, { json }) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error, lists: targets.map((entry) => entry.name) }, null, 2)}\n`);
+  } else {
+    say("");
+    say(`  ${c.red(error)}`);
+    say(`  ${c.gray("lists:")} ${listMenu(targets)}`);
+    say("");
+  }
+  process.exitCode = 1;
+}
+
+/** Every list, purpose first. One block each, so nothing has to be lined up to be read. */
+function listPurposes(config, { json }) {
+  const targets = listsOf(config);
+  const rows = targets.map((entry, index) => ({
+    index: index + 1,
+    name: entry.name,
+    description: entry.description || "",
+    models: entry.models.length,
+    enabled: entry.models.filter((model) => model.enabled).length,
+    active: entry.id === config.activeListId,
+    // Spelled out rather than left to be assembled: a caller that reads this has
+    // one less thing to get wrong, quoting included.
+    use: `llmfp use ${asArgument(entry.name)}`,
+  }));
+
+  if (json) {
+    const live = rows.find((row) => row.active) ?? null;
+    process.stdout.write(`${JSON.stringify({ active: live?.name ?? null, total: rows.length, lists: rows }, null, 2)}\n`);
+    return;
+  }
+
+  say("");
+  say(`  ${c.bold("Model lists")} ${c.gray("— what each one is for. Pick by the note, then run the command under it.")}`);
+  if (!rows.length) say(c.gray("  (none)"));
+  for (const row of rows) {
+    say("");
+    say(
+      `  ${c.bold(row.name)} ${c.gray(`(${row.index}/${rows.length} · ${row.models} model(s), ${row.enabled} enabled)`)}` +
+        (row.active ? `   ${c.green("serving now")}` : ""),
+    );
+    // A list nobody has explained says so, and says what would fix it: the note is
+    // the whole point of this report, so its absence is the news.
+    if (row.description) say(`    ${row.description}`);
+    else say(`    ${c.yellow("no note yet")} ${c.gray(`— ${c.cyan(`llmfp describe ${asArgument(row.name)} "when this list should serve"`)}`)}`);
+    if (!row.active) say(`    ${c.cyan(row.use)}`);
+  }
+  say("");
+}
+
+/** One note, and nothing else: `NOTE=$(llmfp describe cheap)` has to work. */
+function readNote(target, { json }) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ name: target.name, description: target.description || "" }, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${target.description || ""}\n`);
+}
+
+function writeNote(config, target, description, { json }) {
+  describeTarget(config, target.id, description);
+  saveConfig(config);
+  const saved = target.description;
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ ok: true, name: target.name, description: saved }, null, 2)}\n`);
+    return;
+  }
+  say("");
+  if (saved) {
+    say(`  ${c.green("saved")} ${c.gray("what")} ${c.bold(target.name)} ${c.gray("is for")}`);
+    say(`    ${saved}`);
+  } else {
+    say(`  ${c.gray("cleared the note on")} ${c.bold(target.name)}`);
+  }
+  say("");
+}
+
 /**
  * Serves another list, from a script or a shell. Exactly what `←→` does in the
  * UI: the chain is swapped in the file, and a proxy already running picks it up
@@ -231,19 +350,11 @@ export function showLists(config, { json = false } = {}) {
  * Exits non-zero when the argument names no list, so a script can branch on it.
  */
 export function useList(config, selector, { json = false } = {}) {
-  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
+  const targets = listsOf(config);
   const found = findTarget(targets, selector);
 
   if (found.error) {
-    if (json) {
-      process.stdout.write(`${JSON.stringify({ ok: false, error: found.error, lists: targets.map((entry) => entry.name) }, null, 2)}\n`);
-    } else {
-      say("");
-      say(`  ${c.red(found.error)}`);
-      say(`  ${c.gray("lists:")} ${listMenu(targets)}`);
-      say("");
-    }
-    process.exitCode = 1;
+    refuse(found.error, targets, { json });
     return;
   }
 

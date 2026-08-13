@@ -179,6 +179,66 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
   }
 });
 
+test("`describe` says what every list is for, and how to serve it", async () => {
+  const proxy = await startProxy({ providers: [], models: [] });
+  const where = { configFile: proxy.file, cwd: proxy.dir };
+  const seed = loadConfig(proxy.file);
+  const second = addTarget(seed, "on the plane");
+  describeTarget(seed, second.id, "nothing may leave the machine");
+  saveConfig(seed, proxy.file);
+
+  try {
+    // The report a caller that did not build these chains chooses by: the note is
+    // what identifies a list, and the command that acts on the choice is under it.
+    const all = await cli(["describe"], where);
+    assert.match(all.stdout, /what each one is for/);
+    // Stopping at the newline, not at a `)`: the counts say `model(s)` themselves.
+    assert.match(all.stdout, /on the plane \(2\/2[^\n]*serving now\n\s+nothing may leave the machine/);
+    // A list nobody has explained is the news of this report, not a blank line.
+    assert.match(all.stdout, /default \(1\/2[^\n]*\n\s+no note yet/);
+    assert.match(all.stdout, /llmfp use default/, "and the way to serve the other one");
+
+    // A name that would not survive a shell is quoted in what the report tells you
+    // to run, so the command can be pasted as it stands.
+    const asJson = JSON.parse((await cli(["describe", "--json"], where)).stdout);
+    assert.equal(asJson.active, "on the plane");
+    assert.deepEqual(
+      asJson.lists.map((entry) => [entry.name, entry.description, entry.use]),
+      [
+        ["default", "", "llmfp use default"],
+        ["on the plane", "nothing may leave the machine", 'llmfp use "on the plane"'],
+      ],
+    );
+
+    // One list, one note, nothing else: `NOTE=$(llmfp describe plane)` has to work.
+    const one = await cli(["describe", "plane"], where);
+    assert.equal(one.stdout, "nothing may leave the machine\n");
+    assert.equal((await cli(["describe", "default"], where)).stdout, "\n", "a list with no note answers with nothing");
+
+    // Two words in means the rest is the note: this is how an agent writes one.
+    const written = await cli(["describe", "default", "everything, in failover order"], where);
+    assert.match(written.stdout, /saved what default is for/);
+    assert.equal(loadConfig(proxy.file).modelLists[0].description, "everything, in failover order");
+
+    // And an empty note takes it back, which is why reading and writing are told
+    // apart by how many words arrive rather than by the note being blank.
+    const cleared = await cli(["describe", "default", ""], where);
+    assert.match(cleared.stdout, /cleared the note on default/);
+    assert.equal(loadConfig(proxy.file).modelLists[0].description, "");
+
+    await assert.rejects(
+      () => cli(["describe", "nope"], where),
+      (err) => {
+        assert.equal(err.code, 1, "the same refusal as `use`, so a script branches the same way");
+        assert.match(err.stdout, /no list called "nope"/);
+        return true;
+      },
+    );
+  } finally {
+    await proxy.close();
+  }
+});
+
 test("`use` refuses a name it cannot place, and says what there was", async () => {
   const proxy = await startProxy({ providers: [], models: [] });
   const where = { configFile: proxy.file, cwd: proxy.dir };

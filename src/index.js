@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { applyCatalog, loadCatalog } from "./catalog.js";
-import { openInterface, showDoctor, showLists, showStats, showStatus, useList } from "./cli.js";
+import { describeList, openInterface, showDoctor, showLists, showStats, showStatus, useList } from "./cli.js";
 import { DEFAULT_PORT, configExists, configPath, loadConfig, resolveSecret, saveConfig } from "./config.js";
 import { installAutostart, logPathFor, logTail, orphaned, removeAutostart, removeServiceCopy, restartDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
@@ -28,6 +28,8 @@ const HELP = `
     status          configuration, failover order, counters, service state
     stats           just the counters table, then back to the shell (--json to pipe it)
     lists           the model lists, and which one is being served (--json too)
+    describe        what each list is for, so a script or an agent can pick one
+                    ${c.gray('`describe <name> "<text>"` says when a list should serve, `""` clears it')}
     use <name|n>    serve another model list, by name or by its number in \`lists\`
     logs            show the end of the background log
     doctor          check this install: PATH, paths in the login entry, keys, service
@@ -39,7 +41,7 @@ const HELP = `
     --port <n>       listen port (default: ${DEFAULT_PORT}; a free port is picked if taken)
     --host <addr>    listen address (default: 127.0.0.1)
     --lines <n>      how many log lines ${c.gray("(logs, default 40)")}
-    --json           machine-readable output ${c.gray("(stats, doctor, lists, use)")}
+    --json           machine-readable output ${c.gray("(stats, doctor, lists, describe, use)")}
     --path           only the PATH check ${c.gray("(doctor; what the installer runs)")}
 
   ${c.bold("Without a terminal")}
@@ -58,8 +60,8 @@ const HELP = `
 `;
 
 function parseArgs(argv) {
-  // `args` holds the words after the command, for the one command that takes an
-  // argument of its own: `use <name|index>`.
+  // `args` holds the words after the command, for the ones that take arguments of
+  // their own: `use <name|index>` and `describe <name|index> [<text>]`.
   const options = { command: null, args: [], configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -268,6 +270,13 @@ async function main() {
     // The `←→` of the UI, for a shell: what the lists are, and which one is served.
     case "lists": {
       showLists(loadConfig(options.configFile), { json: options.json });
+      return;
+    }
+
+    // What each list is for, and how to serve it: the report a caller that did
+    // not build these chains — a script, an agent, you in three months — chooses by.
+    case "describe": {
+      describeList(loadConfig(options.configFile), options.args, { json: options.json });
       return;
     }
 
