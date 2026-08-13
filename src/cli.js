@@ -5,10 +5,11 @@ import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } fr
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
 import { checkForUpdate, updateCommand, updateCommandLine } from "./update.js";
-import { c, compact, ESC, ago, ms, percent } from "./logger.js";
+import { c, compact, ESC, ago, ms, percent, setLogLevel } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
+import { measureExit, probeEgress, rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
 
 /* ------------------------------------------------------------------ *
  * Plain-text report, used by `status`, which must stay pipeable      *
@@ -61,6 +62,10 @@ export async function showStatus(config) {
       service.running ? `${c.green("running")} ${c.gray(`pid ${service.pid} · ${service.url}`)}` : c.gray("not running in the background")
     }   ${c.gray("at login:")} ${autostartInstalled() ? c.green("yes") : c.gray("no")} ${c.gray(`(${autostartTarget().label})`)}`,
   );
+  // Where provider requests go out. Said on every report, both ways round: this
+  // one decides which address a provider rate-limits, so silence is not neutral.
+  const warp = warpSummary(config);
+  say(`  ${warp.enabled ? warpLine(warp) : `${c.gray("outbound:")} ${c.gray("direct, from this machine")} ${c.gray("· `llmfp warp on` routes through Cloudflare WARP")}`}`);
 
   say("");
   say(c.bold("Providers"));
@@ -186,6 +191,8 @@ function statsFromDisk(config) {
         provider: entry ? providerLabel(config, entry.providerId) : null,
         model: entry?.model ?? null,
         alias: entry?.alias ?? null,
+        via: typeof call.via === "string" ? call.via : null,
+        exitIp: typeof call.exitIp === "string" ? call.exitIp : null,
       };
     });
 
@@ -193,6 +200,9 @@ function statsFromDisk(config) {
   return {
     source: "file",
     file,
+    // Read from the configuration, not from the counters: it says where requests
+    // *would* go now, which is what makes the exit IPs below readable.
+    warp: warpSummary(config),
     recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
     updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt : null,
@@ -220,6 +230,7 @@ function printStats(stats) {
         `${compact(stats.totals.cancelled)} cancelled, ${compact(stats.totals.tokens)} token(s)`,
     ),
   );
+  if (stats.warp?.enabled) say(`  ${warpLine(stats.warp)}`);
   table(
     ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "USE", "UPTIME", "TOKENS", "LAST USED", "LAST ERROR"],
     // Already in the configuration's order, from whichever source produced it.
@@ -244,6 +255,29 @@ function printStats(stats) {
   printRecent(stats.recent);
 }
 
+/**
+ * One line saying where requests leave from, shared by `stats` and `status`.
+ *
+ * Only ever printed when WARP is on: "direct" is the default and printing it
+ * everywhere would be noise, while staying silent about a WARP that *is* on
+ * would let the exit IPs be read as this machine's own address.
+ */
+function warpLine(warp) {
+  const { egress } = warp;
+  const parts = [c.gray("outbound:"), warp.alive ? c.cyan("Cloudflare WARP") : c.red("Cloudflare WARP, tunnel down")];
+  if (egress) {
+    parts.push(c.gray("· exit"), egress.warp ? c.green(egress.ip) : c.yellow(egress.ip));
+    if (egress.colo) parts.push(c.gray(egress.colo));
+    // WARP is on, and the measurement says the traffic did not go through it.
+    if (!egress.warp) parts.push(c.yellow("— not through WARP"));
+    parts.push(c.gray(`(${ago(egress.at)})`));
+  } else if (warp.alive) {
+    parts.push(c.gray("· exit IP not measured yet"));
+  }
+  if (warp.fallbackDirect) parts.push(c.gray("· falls back to direct"));
+  return parts.join(" ");
+}
+
 /** Rows shown of the last answered requests. */
 const RECENT_ROWS = 5;
 
@@ -259,14 +293,29 @@ function printRecent(recent, limit = RECENT_ROWS) {
   say("");
   say(`  ${c.gray(`last ${calls.length} answered`)}`);
   table(
-    ["WHEN", "MODEL", "TTFT"],
+    ["WHEN", "MODEL", "TTFT", "EXIT IP"],
     calls.map((call) => [
       ago(call.at),
       call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`),
       // A non-streamed answer arrives whole: its first token is its whole latency.
       ms(call.ttftMs),
+      exitCell(call),
     ]),
   );
+}
+
+/**
+ * The address the provider answered back to, for one call.
+ *
+ * Coloured by path rather than by value: what a reader is checking here is "did
+ * this leave through WARP or from this machine", and the point of the column is
+ * that the two are told apart at a glance. A row from before this existed, or
+ * one served with the measurement turned off, says what it knows and no more.
+ */
+function exitCell(call) {
+  if (call.exitIp) return call.via === "warp" ? c.cyan(call.exitIp) : call.exitIp;
+  if (call.via) return c.gray(call.via);
+  return c.gray("-");
 }
 
 /**
@@ -297,6 +346,172 @@ export async function showStats(config, { json = false } = {}) {
   say("");
   printStats(stats);
   say("");
+}
+
+/* ------------------------------------------------------------------ *
+ * `warp`: the outbound path, driven from a shell                       *
+ * ------------------------------------------------------------------ */
+
+export const WARP_ACTIONS = ["status", "on", "off", "up", "down", "rotate"];
+
+/** The WARP block of a report, the same shape whoever asked for it. */
+function printWarp(report) {
+  const field = (label, value) => say(`  ${c.gray(label.padEnd(9))} ${value}`);
+
+  field("routing", report.enabled ? c.green("through Cloudflare WARP") : c.gray("direct, from this machine"));
+  if (!report.supported) {
+    field("platform", c.yellow(report.unsupportedReason));
+    return;
+  }
+  field(
+    "tunnel",
+    report.running
+      ? `${c.green("running")} ${c.gray(`pid ${report.pid} · http ${report.proxyUrl} · ${report.socksUrl}`)}`
+      : report.foreign
+        ? `${c.yellow(`port ${report.httpPort} is taken by something else`)} ${c.gray("— free it, or set another one in the config")}`
+        : c.gray(`not running (would listen on ${report.proxyUrl})`),
+  );
+  field("endpoint", c.gray(`${report.endpoint} ${c.gray("(UDP, must be allowed outbound)")}`));
+
+  const { egress } = report;
+  if (egress) {
+    // Green only when the measurement matches what was asked for. With routing
+    // off, an address that is *not* WARP's is the correct answer, not a warning.
+    const asExpected = report.enabled === egress.warp;
+    field(
+      "exit IP",
+      `${asExpected ? c.green(egress.ip) : c.yellow(egress.ip)} ` +
+        c.gray(
+          `· ${egress.warp ? "through WARP" : "straight from this machine"}${report.enabled && !egress.warp ? " — WARP is on, so this is wrong" : ""}` +
+            `${egress.colo ? ` · ${egress.colo}` : ""} · measured ${ago(egress.at)}`,
+        ),
+    );
+  } else {
+    field("exit IP", c.gray("could not be measured"));
+  }
+  if (report.rotatedAt) field("rotated", c.gray(ago(Date.parse(report.rotatedAt))));
+  field("files", c.gray(report.dir));
+}
+
+/**
+ * Every WARP operation, with no prompt and no terminal UI.
+ *
+ * `rotate` is the reason this exists: an address that is being rate-limited has
+ * to be replaceable from a script or a cron job, at the moment that script
+ * chooses and never on its own. `on`/`off` are here for the same reason — a VPS
+ * has no one to open the Settings screen. All of them take `--json`, and the JSON
+ * carries `ok` and, for `rotate`, `changed`: the two things a script tests.
+ */
+export async function warpCommand(config, args, { json = false } = {}) {
+  const action = String(args[0] || "status").toLowerCase();
+  // `log.info` writes to stdout, which in JSON mode would land inside the object.
+  if (json) setLogLevel("error");
+  const emit = (payload) => process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+
+  if (!WARP_ACTIONS.includes(action)) {
+    const error = `Unknown warp command "${action}". Expected one of: ${WARP_ACTIONS.join(", ")}.`;
+    if (json) emit({ ok: false, action, error });
+    else process.stderr.write(`${error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const finish = async ({ ok, note = null, extra = {} }) => {
+    // Awaited, unlike on the request path: this process is about to print the
+    // answer and exit, so a lookup left running in the background writes nothing.
+    await measureExit(config);
+    const report = await warpReport(config);
+    if (json) emit({ ok, action, ...extra, ...report });
+    else {
+      say("");
+      if (note) say(`  ${note}`);
+      printWarp(report);
+      // Only when something went wrong: the tunnel's own log is the only place
+      // that says why, and nobody would think to look for it otherwise.
+      if (!ok) {
+        const tail = tunnelLogTail(config.__file, 8);
+        if (tail) {
+          say("");
+          say(`  ${c.gray(report.logFile)}`);
+          say(tail.replace(/^/gm, "    "));
+        }
+      }
+      say("");
+    }
+    if (!ok) process.exitCode = 1;
+  };
+
+  switch (action) {
+    case "on":
+    case "off": {
+      const wanted = action === "on";
+      const already = config.warp.enabled === wanted;
+      config.warp.enabled = wanted;
+      saveConfig(config);
+      // Brought in line at once rather than at the next start: somebody who just
+      // typed `warp on` expects the next request to already go that way.
+      const sync = await syncTunnel(config);
+      const ok = !["failed", "unsupported"].includes(sync.action);
+      await finish({
+        ok,
+        note: `${wanted ? c.green("routing through WARP") : c.gray("routing directly")}${already ? c.gray(" (unchanged)") : ""}`,
+        extra: { changed: !already },
+      });
+      return;
+    }
+
+    case "up": {
+      const result = await startTunnel(config);
+      await finish({
+        ok: result.status !== "failed",
+        note:
+          result.status === "already-running"
+            ? c.gray("tunnel already up")
+            : result.status === "started"
+              ? c.green("tunnel up")
+              : c.red("the tunnel did not come up"),
+      });
+      // Up but unused is a real state, and a silent one. The exit IP above is the
+      // path requests take, which is not the tunnel — so the tunnel is checked
+      // separately here, which is the question `warp up` was asking anyway.
+      if (!json && !config.warp.enabled && result.status !== "failed") {
+        const through = await probeEgress({ proxyUrl: result.proxyUrl ?? `http://127.0.0.1:${config.warp.httpPort}` });
+        say(`  ${c.gray("tunnel".padEnd(9))} ${through?.warp ? c.green(`works, would leave from ${through.ip}`) : c.yellow("is up, but nothing came back through it")}`);
+        say(`  ${c.yellow("note")}      ${c.gray("requests still go out directly — `llmfp warp on` routes them through it")}`);
+        say("");
+      }
+      return;
+    }
+
+    case "down": {
+      const result = await stopTunnel(config);
+      await finish({
+        ok: result.status !== "failed",
+        note: result.status === "stopped" ? c.green("tunnel stopped") : result.status === "not-running" ? c.gray("no tunnel was running") : c.red(`could not stop pid ${result.pid}`),
+      });
+      return;
+    }
+
+    case "rotate": {
+      const result = await rotate(config);
+      const before = result.before?.ip ?? null;
+      const after = result.after?.ip ?? null;
+      // Not a failure: WARP may hand back an address in the same range, and a
+      // caller that cares reads `changed` rather than guessing from the exit code.
+      const changed = Boolean(after && before !== after);
+      await finish({
+        ok: result.ok,
+        note: result.ok
+          ? `${c.green("rotated")} ${c.gray(`${before ?? "?"} → ${after ?? "not measured"}`)}${changed ? "" : c.gray(" (same address)")}`
+          : c.red("rotation failed, the tunnel did not come back up"),
+        extra: { changed, before, after },
+      });
+      return;
+    }
+
+    default:
+      await finish({ ok: true });
+  }
 }
 
 /* ------------------------------------------------------------------ *

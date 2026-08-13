@@ -21,6 +21,15 @@ daemon.json
 daemon.log
 service/
 
+# Cloudflare WARP state, when the configuration lives in this directory: the
+# downloaded tunnel binaries, and — the reason this line exists — the WireGuard
+# identity they run on. `wgcf-account.toml`, `wgcf-profile.conf` and
+# `wireproxy.conf` all carry the private key.
+#
+# Anchored with a leading slash: unanchored, it would also match `src/warp/`,
+# which is this feature's source code.
+/warp/
+
 *.log
 coverage/
 .DS_Store

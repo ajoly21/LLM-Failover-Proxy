@@ -740,6 +740,7 @@ test('settings are grouped by moment, and the groups never come back', async () 
   const app = await mount({ view: { name: 'settings' } });
   try {
     assert.match(app.frame(), /Where it listens/);
+    assert.match(app.frame(), /How it reaches the providers/, 'the outbound path is visible without scrolling for it');
     assert.match(app.frame(), /While one request is in flight/);
     assert.match(app.frame(), /\d+-\d+ of \d+/, 'the list is windowed, not clipped');
 

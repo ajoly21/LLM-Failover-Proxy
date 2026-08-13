@@ -16,12 +16,14 @@ const RECENT_ROWS = 5;
 
 /**
  * What the counters cannot say: whether anything is being served right now, by
- * which model, and how long the wait was before the answer started coming.
+ * which model, how long the wait was before the answer started coming, and which
+ * address the provider saw it come from.
  *
  * An average would hide the one call that took eight seconds, which is the only
  * one anybody wants to know about — so these are individual calls, newest first.
- * TTFT is the first to go when the screen cannot hold three columns: the model
- * name is what makes a row mean anything at all.
+ * The exit IP goes first when the screen runs out of room, then TTFT: the model
+ * name is what makes a row mean anything at all. On any terminal 66 columns or
+ * wider all four fit, so the choice only arises on a phone.
  */
 const RECENT_COLUMNS = [
   { key: 'at', label: 'WHEN', align: 'right', width: 9, text: (row) => ago(row.at) },
@@ -34,6 +36,16 @@ const RECENT_COLUMNS = [
   },
   // A non-streamed answer arrives whole, so its first token is its whole latency.
   { key: 'ttft', label: 'TTFT', align: 'right', width: 8, drop: 1, text: (row) => duration(row.ttftMs) },
+  {
+    key: 'exitIp',
+    label: 'EXIT IP',
+    width: 15,
+    drop: 2,
+    // The address, once one has been measured; the path on its own until then,
+    // and for a row served by a proxy too old to report either.
+    text: (row) => row.exitIp || row.via || '-',
+    color: (row) => (row.via === 'warp' ? COLOR.accent : undefined),
+  },
 ];
 
 /** Live view of a running proxy: persisted counters, cooldowns, last errors. */
@@ -166,6 +178,7 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
             h(Text, { color: stats.totals.cancelled ? COLOR.warn : undefined }, `${compact(stats.totals.cancelled)} cancelled`),
             h(Text, { dimColor: true }, ` · ${compact(stats.totals.tokens)} tokens`),
           ),
+          stats.warp?.enabled ? h(WarpLine, { warp: stats.warp }) : null,
           // Reserved: frame, title, hints, the totals line, the gaps, the block
           // of recent calls — and the subtitle's own line once it is narrow.
           h(
@@ -192,6 +205,30 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
           h(Text, { dimColor: true }, `  start the proxy to see live counters${error ? ` (${error})` : ''}`),
           h(Text, { dimColor: true }, '  counters are persisted, so they survive restarts'),
         ),
+  );
+}
+
+/**
+ * The outbound path, on its own line and only when it is not the plain one.
+ *
+ * A line saying "direct" on every screen would be noise; no line at all while
+ * WARP is on would let the exit IPs below be read as this machine's. When the
+ * measurement says the traffic did *not* go through WARP even though it is on,
+ * that is the one thing worth interrupting somebody about.
+ */
+function WarpLine({ warp }) {
+  const { egress } = warp;
+  const up = warp.alive;
+  return h(
+    Text,
+    { wrap: 'truncate' },
+    h(Text, { dimColor: true }, '  outbound  '),
+    h(Text, { color: up ? COLOR.accent : COLOR.fail }, up ? 'Cloudflare WARP' : 'Cloudflare WARP, tunnel down'),
+    egress ? h(Text, { dimColor: true }, ' · exit ') : null,
+    egress ? h(Text, { color: egress.warp ? COLOR.ok : COLOR.warn }, egress.ip) : null,
+    egress?.colo ? h(Text, { dimColor: true }, ` ${egress.colo}`) : null,
+    egress && !egress.warp ? h(Text, { color: COLOR.warn }, ' — not through WARP') : null,
+    warp.rotatedAt ? h(Text, { dimColor: true }, ` · rotated ${ago(Date.parse(warp.rotatedAt))}`) : null,
   );
 }
 

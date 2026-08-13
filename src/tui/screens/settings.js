@@ -17,12 +17,13 @@ import { envPathFor, upsertEnv } from '../../env.js';
  * the value. Nobody should have to open the README to understand a line here.
  */
 /**
- * The five groups, in the order a request lives through them. The cooldown one
+ * The six groups, in the order a request lives through them. The cooldown one
  * is deliberately worded to say what the timeouts above do not: it is about the
  * requests that come *after* the one that failed.
  */
 const SECTIONS = {
   server: 'Where it listens',
+  outbound: 'How it reaches the providers',
   request: 'While one request is in flight',
   failure: 'When a model fails or is unknown',
   cooldown: 'Afterwards, for the next requests',
@@ -85,6 +86,42 @@ export const SETTINGS = [
     ],
     get: (c) => c.server.cors,
     set: (c, v) => { c.server.cors = v; },
+  },
+  {
+    section: 'outbound',
+    label: 'route through Cloudflare WARP',
+    type: 'boolean',
+    hint: 'Should provider requests leave through a Cloudflare WARP tunnel?',
+    choices: [
+      ['yes', 'providers see a Cloudflare address, not this machine’s'],
+      ['no', 'requests go straight out, from this machine’s own address'],
+    ],
+    get: (c) => c.warp.enabled,
+    set: (c, v) => { c.warp.enabled = Boolean(v); },
+  },
+  {
+    section: 'outbound',
+    label: 'if the WARP tunnel is down',
+    type: 'boolean',
+    hint: 'WARP is on, but its tunnel is not answering. What happens then?',
+    choices: [
+      ['yes', 'send it anyway, from this machine’s address — the stats say so'],
+      ['no', 'fail the request rather than reveal the address WARP hides'],
+    ],
+    get: (c) => c.warp.fallbackDirect,
+    set: (c, v) => { c.warp.fallbackDirect = Boolean(v); },
+  },
+  {
+    section: 'outbound',
+    label: 'measure the exit IP',
+    type: 'boolean',
+    hint: 'Ask Cloudflare which address a request went out from, for the stats.',
+    choices: [
+      ['yes', 'fills the EXIT IP column, one cached lookup every 10 minutes'],
+      ['no', 'no lookup at all; the column then only says which path was used'],
+    ],
+    get: (c) => c.warp.checkExitIp,
+    set: (c, v) => { c.warp.checkExitIp = Boolean(v); },
   },
   {
     section: 'request',

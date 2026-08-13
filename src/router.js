@@ -5,6 +5,7 @@ import { AttemptError, classifyStatus, ClientGoneError, parseRetryAfter, REASONS
 import { c, compact, log, ms } from "./logger.js";
 import { createSseParser, SSE_DONE } from "./sse.js";
 import { cooldownRemaining, isCoolingDown, recordCancelled, recordFailure, recordStart, recordSuccess } from "./state.js";
+import { exitFor, fetchVia, outboundPath } from "./warp/index.js";
 
 const norm = (value) =>
   String(value || "")
@@ -153,14 +154,14 @@ function createWatchdog(controller) {
   };
 }
 
-async function attemptJson({ config, entry, provider, adapter, body, kind, controller, claim }) {
+async function attemptJson({ config, entry, provider, adapter, body, kind, controller, claim, send }) {
   const watchdog = createWatchdog(controller);
   watchdog.arm(config.failover.requestTimeoutMs, `no response within ${ms(config.failover.requestTimeoutMs)}`);
 
   try {
     const url = kind === "embedding" ? adapter.embeddingEndpoint(provider) : adapter.chatEndpoint(provider);
     const payload = kind === "embedding" ? adapter.buildEmbeddingBody(body, entry) : adapter.buildChatBody(body, entry);
-    const response = await fetch(url, {
+    const response = await send(url, {
       method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
       body: JSON.stringify(payload),
@@ -192,7 +193,7 @@ async function attemptJson({ config, entry, provider, adapter, body, kind, contr
  * until that point the attempt can still lose the race, or be replaced by the
  * next provider, without the client ever noticing.
  */
-async function attemptStream({ config, entry, provider, adapter, body, sink, controller, claim, meta }) {
+async function attemptStream({ config, entry, provider, adapter, body, sink, controller, claim, meta, send }) {
   const watchdog = createWatchdog(controller);
   watchdog.arm(config.failover.firstTokenTimeoutMs, `no token within ${ms(config.failover.firstTokenTimeoutMs)}`);
 
@@ -233,7 +234,7 @@ async function attemptStream({ config, entry, provider, adapter, body, sink, con
   };
 
   try {
-    const response = await fetch(adapter.chatEndpoint(provider), {
+    const response = await send(adapter.chatEndpoint(provider), {
       method: "POST",
       headers: adapter.headers(provider, resolveSecret(provider.apiKey)),
       body: JSON.stringify({ ...adapter.buildChatBody(body, entry), stream: true }),
@@ -446,6 +447,34 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
     };
   }
 
+  /**
+   * Which way out, decided once for the whole request rather than per attempt.
+   *
+   * A chain that failed over would otherwise be reported half as WARP and half
+   * as direct, and `/stats` could then answer "where did this leave from" with
+   * neither. It also means one loopback probe per request instead of one per
+   * attempt — see `outboundPath`, which caches it for a couple of seconds.
+   */
+  const path = await outboundPath(config);
+  if (path.unavailable) {
+    // Failing here rather than in every attempt: the chain is irrelevant, one
+    // clear sentence about the tunnel is the whole answer.
+    return {
+      type: "error",
+      status: 503,
+      message:
+        `Cloudflare WARP is enabled, but its tunnel is not answering on 127.0.0.1:${config.warp.httpPort}. ` +
+        "Start it with `llm-failover-proxy warp up`, `warp status` says why it did not come up, " +
+        "and Settings can let requests go out directly instead.",
+      errorType: "warp_unavailable",
+      attempts: [],
+    };
+  }
+  if (path.degraded) {
+    log.warn(`[${requestId}] ${c.yellow("warp tunnel down")} → going out directly instead, as configured`);
+  }
+  const send = fetchVia(path);
+
   const order = orderByAvailability(entries);
   const limit = config.failover.maxAttempts > 0 ? Math.min(config.failover.maxAttempts, order.length) : order.length;
   const hedgeDelayMs = Math.max(0, Number(config.failover.hedgeDelayMs) || 0);
@@ -529,7 +558,7 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
 
       const settle = (async () => {
         try {
-          const shared = { config, entry, provider, adapter, body, controller, claim: claimFor(position) };
+          const shared = { config, entry, provider, adapter, body, controller, claim: claimFor(position), send };
           return streaming ? await attemptStream({ ...shared, sink, meta }) : await attemptJson({ ...shared, kind });
         } catch (err) {
           if (err?.name === "ClientGoneError") return { kind: "gone" };
@@ -631,7 +660,9 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
         // A non-streamed answer has no first token of its own: the whole body
         // arrives at once, so the wait that ended is the request's own latency.
         const ttft = outcome.committedAt ? outcome.committedAt - task.startedAt : latency;
-        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage) });
+        // The address this answer came back to, as last measured on this same
+        // path: what makes `/stats` able to say VPS or WARP, per request.
+        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage), exit: exitFor(config, path) });
         log.info(
           `[${requestId}] ${c.green("ok")} ${target} (${place}${streaming ? ", stream" : ""}) ${ms(latency)}` +
             `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ""}` +

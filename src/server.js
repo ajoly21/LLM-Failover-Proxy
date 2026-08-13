@@ -11,6 +11,7 @@ import { findAvailablePort } from "./net.js";
 import { failureFrames, listModels, run } from "./router.js";
 import { createGoneSignal } from "./signal.js";
 import { statsFile as currentStatsFile, enableStatsPersistence, recentCalls, snapshot, stateFor, statsSince } from "./state.js";
+import { syncTunnel, warpEnabled, warpSummary } from "./warp/index.js";
 
 const MAX_BODY = 32 * 1024 * 1024;
 
@@ -163,7 +164,7 @@ function createSink(res, config) {
 
 /** The last answered requests, named: ids mean nothing to a reader. */
 function recentPayload(config) {
-  return recentCalls().map(({ id, at, ttftMs }) => {
+  return recentCalls().map(({ id, at, ttftMs, via, exitIp }) => {
     const entry = config.models.find((model) => model.id === id);
     return {
       id,
@@ -172,6 +173,11 @@ function recentPayload(config) {
       provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
       model: entry?.model ?? null,
       alias: entry?.alias ?? null,
+      // Which way this one left, and the address the provider answered back to.
+      // Added, never substituted: a reader built against an older proxy sees
+      // these missing and says so, rather than misreading another field.
+      via: via ?? null,
+      exitIp: exitIp ?? null,
     };
   });
 }
@@ -185,6 +191,9 @@ function statsPayload(config) {
     // Counters are persisted, so they usually predate this process.
     statsSince: statsSince(),
     totals,
+    // Where requests go out, so a reader does not have to open the config file
+    // to know whether an exit IP below is supposed to be WARP's.
+    warp: warpSummary(config),
     recent: recentPayload(config),
     providers: config.providers.map((p) => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, enabled: p.enabled })),
     chain: config.models.map((entry, index) => {
@@ -240,10 +249,16 @@ export function createServer({ configFile, statsFile } = {}) {
 
   const reload = (why) => {
     try {
+      const warpBefore = JSON.stringify(config.warp);
       config = loadConfig(configFile);
       configStamp = fingerprint(config.__file);
       setLogLevel(config.server.logLevel);
       log.info(c.cyan("config reloaded"), c.gray(`(${why})`), `— ${config.models.length} model(s), ${config.providers.length} provider(s)`);
+      // Only when the WARP settings themselves moved. This is what makes the
+      // toggle in the Settings screen reach a server that is already running,
+      // while an unrelated save leaves a serving tunnel alone. Not awaited: a
+      // reload happens on the request path, and installing must not block it.
+      if (JSON.stringify(config.warp) !== warpBefore) void syncTunnel(config);
     } catch (err) {
       log.error(`could not reload config: ${err.message}`);
     }
@@ -457,6 +472,12 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   if (statsPath) {
     log.raw(`  ${c.gray("stats          ")}  ${statsPath} ${c.gray(`(since ${isoMinutes(statsSince())})`)}`);
   }
+  // Said here because it changes what every request does, and silence would read
+  // as "straight out" whichever way it is set.
+  log.raw(
+    `  ${c.gray("outbound       ")}  ` +
+      (warpEnabled(config) ? `${c.cyan("Cloudflare WARP")} ${c.gray(`(127.0.0.1:${config.warp.httpPort})`)}` : c.gray("direct, from this machine's own address")),
+  );
   log.raw("");
 
   const chain = config.models.filter((entry) => entry.enabled);
@@ -521,6 +542,12 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   const dropRuntime = () => clearRuntime(config.__file);
   app.server.once("close", dropRuntime);
   process.once("exit", dropRuntime);
+
+  // Last, and on purpose: the runtime file is already written and the port is
+  // already answering, so `start -d` has been detected as up before a first
+  // install spends a minute downloading the tunnel. Never fatal either — WARP
+  // failing to come up is reported, it does not stop the proxy from serving.
+  if (warpEnabled(config)) await syncTunnel(config);
 
   // Spreading `app` would copy the value of its `config` getter once and freeze
   // it, so a caller reading `app.config` after a hot reload would get the old

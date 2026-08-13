@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { applyCatalog, loadCatalog } from "./catalog.js";
-import { openInterface, showDoctor, showStats, showStatus } from "./cli.js";
+import { openInterface, showDoctor, showStats, showStatus, warpCommand } from "./cli.js";
 import { DEFAULT_PORT, configExists, configPath, loadConfig, resolveSecret, saveConfig } from "./config.js";
 import { installAutostart, logPathFor, logTail, orphaned, removeAutostart, removeServiceCopy, restartDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
@@ -8,6 +8,7 @@ import { packageVersion } from "./install.js";
 import { c, log } from "./logger.js";
 import { startServer } from "./server.js";
 import { flushStats } from "./state.js";
+import { stopTunnel } from "./warp/index.js";
 
 const HELP = `
   ${c.bold("llm-failover-proxy")}, one OpenAI-compatible endpoint, many providers, automatic failover
@@ -27,6 +28,9 @@ const HELP = `
     disable         remove the login entry and stop the background proxy
     status          configuration, failover order, counters, service state
     stats           just the counters table, then back to the shell (--json to pipe it)
+    warp            where provider requests go out from ${c.gray("(status by default)")}
+                    ${c.gray("`warp on|off` routes through Cloudflare WARP or straight out")}
+                    ${c.gray("`warp rotate` forces a new WARP exit IP · `warp up|down` the tunnel")}
     logs            show the end of the background log
     doctor          check this install: PATH, paths in the login entry, keys, service
     help, version
@@ -37,7 +41,7 @@ const HELP = `
     --port <n>       listen port (default: ${DEFAULT_PORT}; a free port is picked if taken)
     --host <addr>    listen address (default: 127.0.0.1)
     --lines <n>      how many log lines ${c.gray("(logs, default 40)")}
-    --json           machine-readable output ${c.gray("(stats, doctor)")}
+    --json           machine-readable output ${c.gray("(stats, doctor, warp)")}
     --path           only the PATH check ${c.gray("(doctor; what the installer runs)")}
 
   ${c.bold("Without a terminal")}
@@ -56,7 +60,9 @@ const HELP = `
 `;
 
 function parseArgs(argv) {
-  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
+  // `args` holds the words after the command, for the ones that take arguments of
+  // their own: `warp <up|down|rotate|…>`.
+  const options = { command: null, args: [], configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--config" || arg === "-c") options.configFile = argv[++i];
@@ -68,7 +74,11 @@ function parseArgs(argv) {
     else if (arg === "--path") options.pathOnly = true;
     else if (arg === "--help" || arg === "-h") options.command = "help";
     else if (arg === "--version" || arg === "-v") options.command = "version";
-    else if (!arg.startsWith("-") && !options.command) options.command = arg;
+    // A word, not a flag: the command, then whatever the command takes.
+    else if (!arg.startsWith("-")) {
+      if (!options.command) options.command = arg;
+      else options.args.push(arg);
+    }
   }
   return options;
 }
@@ -99,6 +109,22 @@ function ensureConfig(file) {
     log.warn(`add them to ${envPathFor(file)} or run \`llm-failover-proxy\` to paste them in`);
   }
   return config;
+}
+
+/**
+ * Takes the WARP tunnel down with the proxy that was using it.
+ *
+ * What this tool started, it stops: a tunnel left running after the proxy it
+ * served is gone is a background process nobody asked for and nobody thinks to
+ * look for. Best effort on purpose — a configuration that no longer parses must
+ * not stop `stop` from stopping things.
+ */
+async function stopWarpTunnel(configFile) {
+  try {
+    return await stopTunnel(loadConfig(configFile));
+  } catch {
+    return { status: "not-running" };
+  }
 }
 
 /** Shared reporting for the service commands, so every path says where to look. */
@@ -182,6 +208,7 @@ async function main() {
 
     case "stop": {
       const result = await stopDaemon({ configFile: options.configFile });
+      const tunnel = await stopWarpTunnel(options.configFile);
       say("");
       if (result.status === "stopped") say(`  ${c.green("stopped")} ${c.gray(`(pid ${result.pid})`)}`);
       else if (result.status === "not-running") say(`  ${c.gray("nothing running in the background")}`);
@@ -189,6 +216,7 @@ async function main() {
         say(`  ${c.red(`could not stop pid ${result.pid}`)}: ${result.error}`);
         process.exitCode = 1;
       }
+      if (tunnel.status === "stopped") say(`  ${c.green("warp tunnel stopped")} ${c.gray(`(pid ${tunnel.pid})`)}`);
       say("");
       return;
     }
@@ -227,6 +255,8 @@ async function main() {
       say(entry.removed ? `  ${c.green("login entry removed")} ${c.gray(entry.file)}` : `  ${c.gray("no login entry to remove")} ${c.gray(`(${entry.file})`)}`);
       const stopped = await stopDaemon({ configFile: options.configFile });
       say(stopped.status === "stopped" ? `  ${c.green("stopped")} ${c.gray(`(pid ${stopped.pid})`)}` : `  ${c.gray("nothing running in the background")}`);
+      const tunnel = await stopWarpTunnel(options.configFile);
+      if (tunnel.status === "stopped") say(`  ${c.green("warp tunnel stopped")} ${c.gray(`(pid ${tunnel.pid})`)}`);
       // Only once it is stopped: a running process holds its own script open.
       removeServiceCopy(options.configFile);
       say("");
@@ -256,6 +286,14 @@ async function main() {
       await showStats(loadConfig(options.configFile), { json: options.json });
       return;
     }
+
+    // The outbound path: which address the providers see, and how to change it.
+    // Every subcommand is non-interactive, so a cron job can rotate the exit IP.
+    case "warp": {
+      await warpCommand(loadConfig(options.configFile), options.args, { json: options.json });
+      return;
+    }
+
 
     case "doctor":
     case "check": {

@@ -192,6 +192,7 @@ llmfp                           exactly the same, and so for every command below
 llm-failover-proxy setup        run the setup wizard again
 llm-failover-proxy status       what is configured, what is running, live counters
 llm-failover-proxy stats        just the counters table, then back to the shell
+llm-failover-proxy warp         which address the providers see, and how to change it
 llm-failover-proxy logs         end of the background log
 llm-failover-proxy stop         stop the background proxy
 llm-failover-proxy restart      restart it
@@ -217,11 +218,11 @@ Persisted counters (nothing running, read from disk)
   2     opencode/laguna-s-2.1-free   4    3   0   1   75%  100%    39.8k   23s ago    -
 
   last 4 answered
-  WHEN       MODEL
-  23s ago    opencode/laguna-s-2.1-free
-  2min ago   opencode/laguna-s-2.1-free
-  14min ago  nvidia/z-ai/glm-5.2
-  1h ago     opencode/laguna-s-2.1-free
+  WHEN       MODEL                       TTFT   EXIT IP
+  23s ago    opencode/laguna-s-2.1-free  431ms  direct
+  2min ago   opencode/laguna-s-2.1-free  1.20s  direct
+  14min ago  nvidia/z-ai/glm-5.2         2.84s  direct
+  1h ago     opencode/laguna-s-2.1-free  680ms  direct
 ```
 
 | Column       | Reads as                                                                                              |
@@ -237,7 +238,7 @@ Persisted counters (nothing running, read from disk)
 
 Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced against. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain never to be reached, or it fails when it is — `UPTIME` tells you which.
 
-The rows are always in **your** priority order, the same as the _Models & priority_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
+The rows are always in **your** priority order, the same as the _Models & priority_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model — with `TTFT`, the wait before that answer started, and `EXIT IP`, the address it went out from. That last column reads `direct` when the request left from this machine and a Cloudflare address when it went through the tunnel; see [Cloudflare WARP](#cloudflare-warp-which-address-the-providers-see).
 
 ### The terminal UI
 
@@ -295,6 +296,95 @@ The same screen on a 40-column phone, holding the first model to move it:
 
 `TTFT` is the wait before the first token, `TOK/S` the speed after it — the two numbers that tell you whether a model is worth its place in the chain. Token totals live in the counters (`llmfp stats`), where they add up over time.
 
+## Cloudflare WARP: which address the providers see
+
+By default, nothing here changes: a request leaves from this machine's own address, and the provider rate-limits that address. Turn WARP on and every provider request goes through a Cloudflare WARP tunnel instead, so what the provider sees — and counts against — is a Cloudflare address you can replace on demand.
+
+**It is off by default, and off costs nothing.** No binary is downloaded, no process runs, and no extra request is ever made. Upgrading into this version changes nothing at all until you turn it on.
+
+```
+llmfp warp              where requests go out from right now
+llmfp warp on           route them through Cloudflare WARP
+llmfp warp off          back to going straight out
+llmfp warp rotate       throw the WARP identity away and get a new exit IP
+llmfp warp up / down    start or stop the tunnel without changing the routing
+```
+
+Or flip it in the UI, under `3. Settings` → _How it reaches the providers_. Either way a proxy that is already running picks the change up within a second or two — there is nothing to restart.
+
+### Turning it on
+
+```
+$ llmfp warp on
+  routing through WARP
+  routing   through Cloudflare WARP
+  tunnel    running pid 20712 · http http://127.0.0.1:25345 · socks5://127.0.0.1:25344
+  endpoint  162.159.192.1:2408 (UDP, must be allowed outbound)
+  exit IP   104.28.211.192 · through WARP · CDG · measured 1s ago
+  files     ~/.config/llm-failover-proxy/warp
+```
+
+The first time, this downloads two small executables next to your configuration and registers a free WARP device — about seven seconds in total, once per machine:
+
+- [**wgcf**](https://github.com/ViRb3/wgcf) registers the WARP account and turns it into a WireGuard profile.
+- [**wireproxy**](https://github.com/whyvl/wireproxy) runs that profile as a **userspace** tunnel exposing two local proxies.
+
+Both are pinned to a version and verified against the SHA-256 list published beside them in their own release; a download that does not match, or that the release does not attest at all, is refused rather than run. Nothing needs root, no network interface is created, and nothing about the rest of your machine's traffic changes — only this proxy's outbound requests go through the tunnel.
+
+The one requirement is **outbound UDP to port 2408**. That is what a restrictive corporate network tends to block, and it is the usual reason the tunnel does not come up.
+
+### The exit IP, per request
+
+`llmfp stats` and the UI's _Status & stats_ screen gain an `EXIT IP` column: for each of the last answered requests, the address that request went out from.
+
+```
+  last 3 answered
+  WHEN     MODEL                        TTFT   EXIT IP
+  19s ago  openrouter/liquid/lfm-2.5    1.68s  104.28.211.192
+  2min ago openrouter/liquid/lfm-2.5    1.97s  104.28.211.192
+  6min ago openrouter/liquid/lfm-2.5    2.10s  direct
+```
+
+`direct` means that one left from this machine. A row like the third one, while WARP is on, is worth noticing: it is a request that went around the tunnel.
+
+The address is measured on the path the request took, by asking Cloudflare's `cdn-cgi/trace` — which also confirms that the traffic really did arrive through WARP, something a plain IP echo cannot tell you. It is cached for ten minutes, so this costs one lookup per ten minutes of traffic, and **it only happens while WARP is on**: an install that leaves WARP off makes exactly as few requests of its own as it did before. `warp.checkExitIp` turns it off entirely, and `llmfp warp status` will still measure on demand.
+
+One honest limit: **WARP does not egress from a single address.** The IP shown is the one that connection left from, and another request may leave from a neighbouring address in the same Cloudflare range. It answers "did this go through WARP or straight out", which is the question — not "the exact address provider X logged for request Y".
+
+### Rotating the exit IP
+
+This is what the feature is for. When a provider is rate-limiting you by address:
+
+```
+$ llmfp warp rotate
+  rotated 104.28.211.192 → 104.28.243.187
+```
+
+The WARP device registration is thrown away and a new one made, which takes about three seconds. It is deliberately never automatic and never interactive, so a script or a cron job decides when: requests in flight through the tunnel fail while it is down, and only you know when that is acceptable.
+
+`warp rotate --json` reports `ok` and `changed`, which are the two fields worth testing — a rotation that comes back with an address in the same range is not a failure, so the exit code stays `0` and `changed` tells you whether the address actually moved.
+
+### When the tunnel is not there
+
+WARP on and the tunnel down is the case that matters, because the wrong answer leaks the address you turned WARP on to hide. So by default **the request fails**, with a message saying what to do:
+
+```
+Cloudflare WARP is enabled, but its tunnel is not answering on 127.0.0.1:25345.
+Start it with `llm-failover-proxy warp up` …
+```
+
+Set `warp.fallbackDirect` (_if the WARP tunnel is down_ in Settings) to send it from this machine's own address instead. Nothing is hidden either way: the `EXIT IP` column says `direct` for every request that went out that way.
+
+**Local providers always bypass the tunnel**, whatever the setting. Ollama on `127.0.0.1`, or an inference box on your LAN, cannot be reached from inside a tunnel that egresses on the internet — so loopback, private and `.local` addresses go straight out, the way every HTTP client treats `NO_PROXY`.
+
+### Where it lives, and one thing to know
+
+Everything sits in a `warp/` folder beside your configuration: the two executables, the WireGuard identity, the generated tunnel config, and `wireproxy.log` — which is where `warp status` points you when a tunnel does not come up.
+
+**That folder holds a private key.** It is `0600` and the folder `0700` where the OS supports it, and it must never be committed; the repository's own `.gitignore` covers `warp/`.
+
+Two other things worth stating plainly: the tunnel goes down with the proxy (`llmfp stop` stops both), and registering free WARP devices — a fortiori rotating them to get around a rate limit — is outside what Cloudflare's terms cover. That is your call to make, not this tool's.
+
 ## Where your settings live
 
 Two files, side by side, **configuration** and **secrets** are deliberately kept apart:
@@ -306,6 +396,7 @@ Two files, side by side, **configuration** and **secrets** are deliberately kept
 | `.env.example`                          | the variables the default chain expects, with links to get each key                                                                     | shipped with the package |
 | `<config>.stats.json`                   | counters and cooldowns, so they survive restarts                                                                                        | no                       |
 | `daemon.log`, `daemon.json`, `service/` | the background proxy: its output, its pid and port, and the copy of the CLI it runs (so uninstalling is never blocked by a file in use) | no                       |
+| `warp/`                                 | only if you turn WARP on: the two downloaded executables, its log — and the **WireGuard private key**, `0600` inside a `0700` folder    | **never**                |
 
 The configuration file is looked up in this order: `--config <path>`, `$LLM_PROXY_CONFIG`, `./llm-proxy.config.json` or `./config.json`, then `%APPDATA%\llm-failover-proxy\config.json` (Windows) / `${XDG_CONFIG_HOME:-~/.config}/llm-failover-proxy/config.json`.
 
@@ -378,6 +469,21 @@ Everything below is in the UI under `3. Settings`, where each line explains itse
 | `server.apiKey`   | none        | key your own apps must send. Empty means no check, which is fine on `127.0.0.1`. `env:LLM_PROXY_API_KEY` keeps it in the `.env` |
 | `server.cors`     | `true`      | whether a web page may call the proxy straight from the browser                                                                 |
 | `server.logLevel` | `info`      | `debug` prints every attempt and its timing                                                                                     |
+
+### How it reaches the providers
+
+Off means straight out from this machine, which is what every version before this one did. [Cloudflare WARP](#cloudflare-warp-which-address-the-providers-see) explains the rest.
+
+| Key                   | Default              | What it does                                                                                                        |
+| --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `warp.enabled`        | `false`              | route provider requests through a Cloudflare WARP tunnel instead of sending them from this machine                  |
+| `warp.fallbackDirect` | `false`              | WARP is on but its tunnel is not answering: `false` fails the request, `true` sends it from this machine's address   |
+| `warp.checkExitIp`    | `true`               | measure the address requests go out from, for the `EXIT IP` column. Only ever while WARP is on, cached ten minutes   |
+| `warp.socksPort`      | `25344`              | the SOCKS5 proxy the tunnel exposes, for whatever else you want to point at it                                      |
+| `warp.httpPort`       | `25345`              | the HTTP proxy this proxy's own outbound requests go through                                                        |
+| `warp.endpoint`       | `162.159.192.1:2408` | Cloudflare's WARP endpoint. Needs outbound **UDP** to that port                                                     |
+
+Change either port if something else on the machine already uses it — including a second configuration with its own tunnel, since two of them cannot share one port. A tunnel is only ever adopted when this proxy started it: a port answering for some other reason is reported as taken, not used.
 
 ### While one request is in flight
 
@@ -461,6 +567,10 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 **I want it gone.** `llm-failover-proxy disable`, then `npm rm -g llm-failover-proxy`. Either order works, uninstalling never fails because the proxy is running, and a login entry left behind by an uninstalled package removes itself the next time it fires. Your configuration and keys stay where they are.
 
 **A provider needs a special header, or a fixed `max_tokens`.** Both are supported per provider and per model in `config.json` (`headers`, `params`).
+
+**The WARP tunnel does not come up.** `llmfp warp status` says what it found and prints the end of `wireproxy.log` when something failed. Two causes cover almost all of it: **outbound UDP to port 2408 is blocked**, which a corporate network or a locked-down VPS often does — the tunnel then handshakes and carries nothing — or the local port is already taken, which `warp status` reports as such rather than using it. `llmfp warp down && llmfp warp up` re-reads everything; `llmfp warp rotate` also re-registers the identity from scratch.
+
+**Requests fail with `warp_unavailable`.** WARP is on and its tunnel is not answering, and failing is the deliberate default — sending the request anyway would reveal the address WARP was turned on to hide. Bring the tunnel up, turn WARP off, or set `warp.fallbackDirect` if you would rather it went out directly.
 
 ## For developers
 
