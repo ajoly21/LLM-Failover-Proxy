@@ -1,12 +1,23 @@
 import { Box, Text, useInput } from "ink";
-import { useState } from "react";
-import { describeKey, envVarName, newId } from "../../config.js";
+import { useEffect, useRef, useState } from "react";
+import { describeKey, envVarName, getProvider, newId } from "../../config.js";
 import { envPathFor, upsertEnv } from "../../env.js";
 import { PRESETS } from "../../presets.js";
+import { probeProvider } from "../../probe.js";
 import { Form } from "../form.js";
 import { h } from "../h.js";
 import { COLOR, SYMBOL, cell } from "../theme.js";
 import { Frame, Hints, Notice } from "../widgets.js";
+
+/**
+ * How long the model list of a provider may take to arrive.
+ *
+ * Much shorter than a model test: someone is sitting on a form waiting to type
+ * a name, and a provider that has not answered by then is better reported as
+ * silent than waited on. Nothing is lost when it expires — the field stays a
+ * plain text field.
+ */
+const LOOKUP_TIMEOUT_MS = 6000;
 
 const PROTOCOLS = [
   { value: "openai", label: "openai", hint: "POST {baseUrl}/chat/completions" },
@@ -170,8 +181,52 @@ export function ProviderForm({ config, providerId, update, notify, onDone }) {
   });
 }
 
+/**
+ * The model ids a provider advertises on its `/models` endpoint.
+ *
+ * Looked up once per provider and kept for as long as the form is open, so
+ * moving back and forth between two providers queries neither of them twice.
+ * A provider that fails — no key, offline, an endpoint it does not serve — is
+ * remembered as failed for the same reason: it must not be retried on every
+ * keystroke.
+ */
+function useProviderModels(config, providerId) {
+  const [byProvider, setByProvider] = useState({});
+  const alive = useRef(true);
+
+  useEffect(
+    () => () => {
+      alive.current = false; // a lookup that lands after the form closed is dropped
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const provider = getProvider(config, providerId);
+    // `byProvider` is deliberately not a dependency: it is read to find out
+    // whether this provider has already been asked, and adding it would make
+    // the answer itself trigger the next lookup.
+    if (!provider || byProvider[providerId]) return;
+    setByProvider((previous) => ({ ...previous, [providerId]: { loading: true, models: [] } }));
+    probeProvider(provider, LOOKUP_TIMEOUT_MS).then((result) => {
+      if (!alive.current) return;
+      setByProvider((previous) => ({
+        ...previous,
+        [providerId]: { loading: false, models: result.models ?? [], error: result.ok ? null : result.message },
+      }));
+    });
+  }, [providerId]);
+
+  return byProvider[providerId] ?? { loading: true, models: [] };
+}
+
 export function ModelForm({ config, modelId, update, notify, onDone }) {
   const existing = modelId ? config.models.find((entry) => entry.id === modelId) : null;
+  // Mirrors the provider the form has selected, so what is offered for the
+  // model id follows it: the point of the list is that it belongs to *this*
+  // provider, not to the first one in the config.
+  const [providerId, setProviderId] = useState(existing?.providerId ?? config.providers[0]?.id ?? null);
+  const lookup = useProviderModels(config, providerId);
 
   if (!config.providers.length) {
     return h(Notice, { title: "Add a model", message: "add a provider first", onBack: onDone });
@@ -182,7 +237,28 @@ export function ModelForm({ config, modelId, update, notify, onDone }) {
     label: provider.name,
     hint: provider.baseUrl,
   }));
-  const sample = PRESETS.find((preset) => preset.name === config.providers[0].name)?.sample ?? "";
+  const provider = getProvider(config, providerId) ?? config.providers[0];
+  const sample = PRESETS.find((preset) => preset.name === provider.name)?.sample ?? "";
+
+  // What the provider advertises, plus what this config already runs on it and
+  // the preset sample: the field stays useful when the lookup fails, and the
+  // models the user has been typing by hand until now are offered back.
+  const configured = new Set(config.models.filter((entry) => entry.providerId === providerId).map((entry) => entry.model));
+  const candidates = [...new Set([...lookup.models, ...configured, sample].filter(Boolean))];
+  const suggest = {
+    items: candidates.map((value) => ({ value, hint: configured.has(value) ? "already in the chain" : null })),
+    loading: lookup.loading,
+    // What is left when the lookup fails is whatever this config already knew,
+    // which says nothing about the models the provider actually serves.
+    partial: Boolean(lookup.error),
+    note: lookup.loading
+      ? `asking ${provider.name} which models it serves…`
+      : lookup.error
+        ? `${provider.name} did not answer with a model list (${lookup.error})`
+        : candidates.length
+          ? `${candidates.length} model${candidates.length > 1 ? "s" : ""} on ${provider.name} · type to filter`
+          : `${provider.name} advertises no model · type the id yourself`,
+  };
 
   const fields = [
     {
@@ -200,6 +276,7 @@ export function ModelForm({ config, modelId, update, notify, onDone }) {
       initial: existing?.model ?? "",
       placeholder: sample || "upstream model id",
       hint: "exactly as the provider names it",
+      suggest,
     },
   ];
 
@@ -277,5 +354,6 @@ export function ModelForm({ config, modelId, update, notify, onDone }) {
     fields,
     onSubmit: submit,
     onCancel: onDone,
+    onChange: (values) => setProviderId(values.providerId),
   });
 }

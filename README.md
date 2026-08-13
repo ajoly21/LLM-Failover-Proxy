@@ -266,6 +266,15 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 
 **Models & priority**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
 
+**Adding a model asks the provider what it serves.** Pick the provider and the model id field fills itself from that provider's own `/models` list — so you type what you remember rather than what you can quote. The match is on any part of the name, not its start: with nvidia selected, `glm` offers `z-ai/glm-5.2`, and several words narrow it further (`glm free`). `↑↓` walks the list — scrolling through the matches that do not fit, the count below says where you are — `enter` takes one, `tab` moves to the next field, and models already in your chain are marked as such. A provider that cannot be reached — no key yet, or offline — says so and leaves the field a plain text box, so nothing here can stop you typing an id by hand.
+
+```
+▸ model id  glm
+            z-ai/glm-5.2
+          ▸ z-ai/glm-4.7-air   already in the chain
+            z-ai/glm-5.2-free
+```
+
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
 ```

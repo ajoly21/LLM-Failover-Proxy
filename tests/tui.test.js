@@ -10,6 +10,8 @@ import { App } from '../src/tui/app.js';
 import { loadConfig } from '../src/config.js';
 import { envPathFor, readEnvFile, resetEnvCache } from '../src/env.js';
 import { SETTINGS } from '../src/tui/screens/settings.js';
+import { matchSuggestions } from '../src/tui/widgets.js';
+import { Form } from '../src/tui/form.js';
 import { PRESETS } from '../src/presets.js';
 import { startMock } from './mock-provider.js';
 
@@ -572,6 +574,77 @@ test('a required field blocks saving and says which one', async () => {
   }
 });
 
+test('suggestions match the middle of a name and rank the ones that start a word first', () => {
+  const items = ['openai/gpt-5-mini', 'z-ai/glm-5.2', 'z-ai/glm-5.2-free', 'my-glmodel', 'llama-3.3-70b'];
+
+  // What someone types is the part of the name they remember, not its start:
+  // this is the case the whole feature exists for.
+  const glm = matchSuggestions(items, 'glm');
+  assert.deepEqual(glm, ['z-ai/glm-5.2', 'z-ai/glm-5.2-free', 'my-glmodel'], 'a substring match, shortest and word-initial first');
+
+  assert.deepEqual(matchSuggestions(items, 'GLM-5.2'), ['z-ai/glm-5.2', 'z-ai/glm-5.2-free'], 'case is ignored');
+  assert.deepEqual(matchSuggestions(items, 'free glm'), ['z-ai/glm-5.2-free'], 'every word must appear, in any order');
+  assert.deepEqual(matchSuggestions(items, 'nothing'), [], 'no match is an empty list, not everything');
+  assert.deepEqual(matchSuggestions(items, '   '), [], 'an empty field offers nothing rather than the whole catalogue');
+  assert.deepEqual(matchSuggestions([{ value: 'z-ai/glm-5.2', hint: 'in the chain' }], 'glm')[0].hint, 'in the chain', 'items keep their hint');
+});
+
+test('the model form offers the models the selected provider advertises', async () => {
+  const zed = await startMock('ok', { name: 'zed' });
+  const app = await mount({
+    providers: [{ ...provider('zed'), baseUrl: zed.baseUrl }],
+    view: { name: 'model-form' },
+  });
+  try {
+    await tick(5); // the lookup is a real HTTP call to the mock
+    await app.press(KEY.down); // onto the model id field
+    assert.match(app.frame(), /2 models on zed/, 'the field says what it knows before anything is typed');
+    assert.doesNotMatch(app.frame(), /zed-model-a/, 'but it does not dump the whole list unprompted');
+
+    await app.type('zzz');
+    assert.match(app.frame(), /no match for "zzz"/, 'a list known to be complete says when a name is not in it');
+    await app.press(String.fromCharCode(21)); // ctrl+u, clear the field
+
+    await app.type('model-b');
+    assert.match(app.frame(), /zed-model-b/, 'typing part of a name offers it');
+    assert.doesNotMatch(app.frame(), /zed-model-a/, 'and only it');
+
+    await app.press(KEY.down); // into the list
+    await app.press(KEY.enter); // take the highlighted one
+    await tick();
+    assert.match(app.frame(), /zed-model-b/);
+    assert.doesNotMatch(app.frame(), /no match/, 'a name that was just picked from the list is not then called unknown');
+
+    await app.press(KEY.ctrlS);
+    await tick();
+    const saved = app.config().models;
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].model, 'zed-model-b', 'the accepted suggestion is what gets saved');
+  } finally {
+    await app.close();
+    await zed.close();
+  }
+});
+
+test('a provider that cannot be listed leaves the model id a plain text field', async () => {
+  // Port 9 is the discard port: nothing answers, so the lookup fails.
+  const app = await mount({ providers: [provider('groq')], view: { name: 'model-form' } });
+  try {
+    await tick(5);
+    await app.press(KEY.down);
+    assert.match(app.frame(), /did not answer with a model list/, 'the failure is reported, not hidden');
+
+    await app.type('llama-3.3-70b');
+    assert.doesNotMatch(app.frame(), /no match/, 'a list that was never obtained does not get to call a name unknown');
+
+    await app.press(KEY.ctrlS);
+    await tick();
+    assert.equal(app.config().models[0].model, 'llama-3.3-70b', 'typing the id by hand still works');
+  } finally {
+    await app.close();
+  }
+});
+
 test('settings toggle booleans, cycle enums and edit numbers in place', async () => {
   const app = await mount({ view: { name: 'settings' } });
   try {
@@ -874,6 +947,62 @@ test('the reorder that needs no modifier works on a phone-sized terminal', async
     assert.ok(width <= PHONE.columns && height <= PHONE.rows, 'and holding a model does not make the screen overflow');
   } finally {
     await app.close();
+  }
+});
+
+test('a suggestion list longer than the screen scrolls instead of hiding the rest', async () => {
+  const items = Array.from({ length: 9 }, (_, index) => `mistralai/model-${index + 1}`);
+  let saved = null;
+  const fields = [
+    { name: 'model', label: 'model id', type: 'text', required: true, initial: '', suggest: { items, note: `${items.length} models` } },
+    { name: 'position', label: 'priority', type: 'number', initial: '1' },
+  ];
+  const ui = render(h(Form, { title: 'Add a model', fields, onSubmit: (values) => { saved = values; }, onCancel: () => {} }));
+  try {
+    await tick();
+    for (const char of 'model') {
+      ui.stdin.write(char);
+      await tick(1);
+    }
+    assert.match(ui.lastFrame(), /showing 1-6 of 9/, 'the screenful is counted against the whole');
+    assert.doesNotMatch(ui.lastFrame(), /model-9/, 'the tail starts off screen');
+
+    for (let index = 0; index < 9; index += 1) {
+      ui.stdin.write(KEY.down);
+      await tick(1);
+    }
+    assert.match(ui.lastFrame(), /showing 4-9 of 9/, 'the window follows the cursor down');
+    assert.match(ui.lastFrame(), /model-9/, 'so the last match is reachable');
+
+    ui.stdin.write(KEY.enter); // take it
+    await tick();
+    ui.stdin.write(KEY.ctrlS);
+    await tick();
+    assert.equal(saved?.model, 'mistralai/model-9', 'a match past the first screenful can be picked');
+  } finally {
+    ui.unmount();
+  }
+});
+
+test('the model form fits a phone screen with its suggestion list open', async () => {
+  const zed = await startMock('ok', { name: 'zed' });
+  const app = await mount({
+    ...PHONE,
+    providers: [{ ...provider('zed'), baseUrl: zed.baseUrl }],
+    view: { name: 'model-form' },
+  });
+  try {
+    await tick(5);
+    await app.press(KEY.down);
+    await app.type('model');
+    assert.match(app.frame(), /zed-model-a/, 'the list is open');
+
+    const { width, height } = shape(app);
+    assert.ok(width <= PHONE.columns, `the form is ${width} columns wide, the terminal has ${PHONE.columns}`);
+    assert.ok(height <= PHONE.rows, `the form needs ${height} rows, the terminal has ${PHONE.rows}`);
+  } finally {
+    await app.close();
+    await zed.close();
   }
 });
 

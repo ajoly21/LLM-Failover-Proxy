@@ -182,6 +182,60 @@ export function editText(value, input, key) {
   return value + printable;
 }
 
+/**
+ * Candidates that contain what has been typed, best first.
+ *
+ * The match is a substring, not a prefix: a model is looked for by the part of
+ * its name the user remembers, and typing `glm` has to find `z-ai/glm-5.2`.
+ * Several words narrow it down further — each one must appear, in any order,
+ * so `glm free` finds `z-ai/glm-5.2-free` without caring which comes first.
+ *
+ * Ranking is by how much of a name the first word was. An id is usually
+ * `vendor/name`, and what gets typed is nearly always the start of the name,
+ * so `z-ai/glm-5.2` has to come out ahead of `my-glmodel` for `glm` even
+ * though both contain it. Hence three tiers: the id or its name part starts
+ * with the word, some word inside it starts with it, or it is buried in the
+ * middle of one. Then the earliest match, the shortest id, and alphabetical
+ * order, so the list never reshuffles between two keystrokes.
+ *
+ * An item is a string or `{ value, hint }`.
+ */
+export function matchSuggestions(items, query) {
+  const terms = String(query ?? '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!terms.length) return [];
+
+  const [first] = terms;
+  const scored = [];
+  for (const item of items) {
+    const value = String(typeof item === 'string' ? item : item.value);
+    const haystack = value.toLowerCase();
+    if (!terms.every((term) => haystack.includes(term))) continue;
+
+    let at = haystack.indexOf(first);
+    let tier = 2;
+    if (haystack.startsWith(first) || haystack.slice(haystack.lastIndexOf('/') + 1).startsWith(first)) {
+      tier = 0;
+    } else {
+      // Not the first occurrence but the first useful one: in `xglm-glm-5` the
+      // one that opens a word is what the typing was aiming at.
+      for (let index = at; index !== -1; index = haystack.indexOf(first, index + 1)) {
+        if (!/[a-z0-9]/.test(haystack[index - 1])) {
+          tier = 1;
+          at = index;
+          break;
+        }
+      }
+    }
+    scored.push({ item, value, tier, at });
+  }
+
+  scored.sort((a, b) => a.tier - b.tier || a.at - b.at || a.value.length - b.value.length || (a.value < b.value ? -1 : 1));
+  return scored.map((entry) => entry.item);
+}
+
 /** Dead-end screen with a single way out, so Esc always works. */
 export function Notice({ title, message, tone = COLOR.warn, onBack }) {
   useInput((input, key) => {
