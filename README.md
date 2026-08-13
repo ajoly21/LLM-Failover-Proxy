@@ -237,7 +237,7 @@ Persisted counters (nothing running, read from disk)
 
 Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced against. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain never to be reached, or it fails when it is — `UPTIME` tells you which.
 
-The rows are always in **your** priority order, the same as the _Models & priority_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
+The rows are always in **your** priority order, the same as the _Target lists_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
 
 ### The terminal UI
 
@@ -247,12 +247,12 @@ The rows are always in **your** priority order, the same as the _Models & priori
 │  listening on 127.0.0.1:47821   providers 3   models 10                  │
 │  background running (pid 24188)                                          │
 │                                                                          │
-│ ▸ 1. Providers          endpoints, API keys, protocol                    │
-│   2. Models & priority  failover chain, live latency tests               │
-│   3. Settings           port, timeouts, failover policy                  │
-│   4. Status & stats     persisted counters and cooldowns                 │
-│   5. Setup wizard       add the default chain, paste keys                │
-│   6. Start the server   closes this screen                               │
+│ ▸ 1. Providers         endpoints, API keys, protocol                     │
+│   2. Target lists      failover chain, live latency tests                │
+│   3. Settings          port, timeouts, failover policy                   │
+│   4. Status & stats    persisted counters and cooldowns                  │
+│   5. Setup wizard      add the default chain, paste keys                 │
+│   6. Start the server  closes this screen                                │
 │   7. Quit                                                                │
 ╰──────────────────────────────────────────────────────────────────────────╯
  ↑↓ move · enter open · 1-7 jump · q quit
@@ -264,7 +264,7 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 
 **Providers**, ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
 
-**Models & priority**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
+**Target lists**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
 
 **Adding a model asks the provider what it serves.** Pick the provider and the model id field fills itself from that provider's own `/models` list — so you type what you remember rather than what you can quote. The match is on any part of the name, not its start: with nvidia selected, `glm` offers `z-ai/glm-5.2`, and several words narrow it further (`glm free`). `↑↓` walks the list — scrolling through the matches that do not fit, the count below says where you are — `enter` takes one, `tab` moves to the next field, and models already in your chain are marked as such. A provider that cannot be reached — no key yet, or offline — says so and leaves the field a plain text box, so nothing here can stop you typing an id by hand.
 
@@ -420,7 +420,7 @@ A model set aside is still tried as a **last resort** when nothing else is avail
 
 | Key               | Default | Expires when                                                                                                                               |
 | ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `probe.timeoutMs` | 15000   | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+| `probe.timeoutMs` | 15000   | a test **you** started (`t` on Target lists, `t` on Providers) has not finished. One budget for the whole probe, first token included |
 
 Deliberately separate from the deadlines above: letting a slow model finish a benchmark should not make every real request wait longer.
 
