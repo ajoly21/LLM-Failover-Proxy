@@ -163,7 +163,7 @@ test('home screen lists the menu and reports the configuration', async () => {
     const frame = app.frame();
     assert.match(frame, /llm-failover-proxy/);
     assert.match(frame, /Providers/);
-    assert.match(frame, /Models & priority/);
+    assert.match(frame, /Target lists/);
     assert.match(frame, /Status & stats/);
     assert.match(frame, /127\.0\.0\.1:47821/);
     assert.match(frame, /providers 1/);
@@ -232,7 +232,7 @@ test('a fresh configuration opens on the wizard, and "from scratch" leads to the
 
     await app.press(KEY.down); // → Start from scratch
     await app.press(KEY.enter);
-    assert.match(app.frame(), /Models & priority/, 'lands on the home menu');
+    assert.match(app.frame(), /Target lists/, 'lands on the home menu');
     assert.equal(app.config().providers.length, 0);
   } finally {
     await app.close();
@@ -449,7 +449,7 @@ test('escape drops a held model where it is, rather than putting it back', async
     await app.press(KEY.escape);
     assert.deepEqual(app.config().models.map((entry) => entry.model), ['second', 'first']);
     // Still on the models screen: escape dropped the model, it did not go back.
-    assert.match(app.frame(), /Models & priority/);
+    assert.match(app.frame(), /Target list/);
   } finally {
     await app.close();
   }
@@ -834,7 +834,7 @@ test('escape walks back to the home screen', async () => {
   try {
     assert.match(app.frame(), /PROTOCOL/);
     await app.press(KEY.escape);
-    assert.match(app.frame(), /Models & priority/, 'back on the home menu');
+    assert.match(app.frame(), /Target lists/, 'back on the home menu');
   } finally {
     await app.close();
   }

@@ -153,7 +153,7 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
   return h(
     Frame,
     {
-      title: "Models & priority",
+      title: "Target list",
       subtitle: holding ? `moving ${selected?.alias ?? ""}` : `${models.length} in the chain · order = failover priority`,
       footer: h(Hints, {
         items: holding
