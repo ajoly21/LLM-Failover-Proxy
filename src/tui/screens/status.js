@@ -5,7 +5,7 @@ import { useLayout } from '../size.js';
 import { COLOR, SYMBOL, ago, compact, duration, percent } from '../theme.js';
 import { Frame, Hints, Table } from '../widgets.js';
 import { resolveChain } from '../../router.js';
-import { providerLabel, resolveSecret } from '../../config.js';
+import { activeTarget, providerLabel, resolveSecret } from '../../config.js';
 import { daemonStatus } from '../../daemon.js';
 import { alignChain } from '../../state.js';
 
@@ -84,6 +84,15 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
   const address = `${config.server.host}:${config.server.port}`;
   const recentRows = layout.short ? 3 : RECENT_ROWS;
   const recent = (Array.isArray(stats?.recent) ? stats.recent : []).slice(0, recentRows);
+  const { target: list, total: lists } = activeTarget(config);
+
+  // Counters for the list in use, and only for it. `alignChain` puts the chain in
+  // this configuration's order first and whatever else the proxy reported after
+  // it, so the models of the other lists are exactly the tail that is dropped —
+  // counted, not silently, since a proxy serving another file shows up there too.
+  const aligned = stats ? alignChain(config.models, stats.chain, (providerId) => providerLabel(config, providerId)) : [];
+  const chainRows = aligned.slice(0, config.models.length);
+  const elsewhere = aligned.length - chainRows.length;
 
   // The name shortens first; then the widest numbers go, cheapest first.
   const columns = [
@@ -149,7 +158,9 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
     Frame,
     {
       title: 'Status & stats',
-      subtitle: stats ? `live from ${address}` : `no server answering on ${address}`,
+      // Which list these numbers belong to, once there is more than one to be on.
+      subtitle:
+        (stats ? `live from ${address}` : `no server answering on ${address}`) + (lists > 1 ? ` · list ${list.name}` : ''),
       footer: h(Hints, {
         items: [
           ['esc', 'back'],
@@ -186,10 +197,13 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
             { paddingTop: 1 },
             h(Table, {
               columns,
-              rows: alignChain(config.models, stats.chain, (providerId) => providerLabel(config, providerId)),
+              rows: chainRows,
               maxRows: layout.listRows(12 + recentRows + (layout.narrow ? 1 : 0)),
             }),
           ),
+          elsewhere
+            ? h(Text, { dimColor: true, wrap: 'truncate' }, `  ${elsewhere} more model(s) served, in another list or another config`)
+            : null,
           recent.length
             ? h(
                 Box,

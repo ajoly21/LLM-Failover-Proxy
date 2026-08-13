@@ -86,7 +86,31 @@ export const DEFAULTS = {
   },
   providers: [],
   models: [],
+  // Named chains you switch between. `models` above is the one in use; see
+  // `syncTargets` for which of the two wins.
+  modelLists: [],
+  activeListId: null,
 };
+
+/**
+ * The names these lists carried in a configuration file up to 1.6.
+ *
+ * A file holding them is read, renamed on the way in, and saved back under the
+ * current names — so an install that predates the rename keeps its lists without
+ * anyone having to touch the file. The id keeps its random half, which is what
+ * makes `activeListId` still point at the same chain afterwards, and no history
+ * is lost either way: the counters are keyed on model ids, never on a list id.
+ *
+ * Only the file changed names. The helpers below are still `*Target*`: they are
+ * internal API, and renaming them would churn every caller for no byte anyone
+ * outside this project ever sees.
+ */
+const LEGACY_KEYS = { lists: "targets", activeId: "activeTargetId" };
+const LEGACY_ID = /^tgt_/;
+const listId = (id) => (typeof id === "string" ? id.replace(LEGACY_ID, "lst_") : id);
+
+/** Name given to the list that existing configurations are migrated into. */
+export const DEFAULT_TARGET_NAME = "default";
 
 function configHome() {
   if (process.platform === "win32" && process.env.APPDATA) return path.join(process.env.APPDATA, APP_DIR);
@@ -156,15 +180,28 @@ export function loadConfig(file = configPath()) {
   // A file written before WARP existed has no `warp` block at all; `withDefaults`
   // has already filled it in, and this bounds whatever a newer file carries.
   config.warp = normalizeWarp(config.warp);
+
+  // The current names, or the ones a file written before the rename carries.
+  const lists = Array.isArray(raw.modelLists) ? raw.modelLists : raw[LEGACY_KEYS.lists];
+  config.modelLists = Array.isArray(lists) ? lists.map(normalizeTarget) : [];
+  config.activeListId = listId(raw.activeListId ?? raw[LEGACY_KEYS.activeId] ?? null);
+  // Read once and dropped, so the next save writes the new names only —
+  // `withDefaults` copies every key it finds, this one included.
+  delete config[LEGACY_KEYS.lists];
+  delete config[LEGACY_KEYS.activeId];
+
+  syncTargets(config);
   config.__file = file;
   return config;
 }
 
 export function saveConfig(config, file = config.__file || configPath()) {
+  syncTargets(config);
   const { __file, ...clean } = config;
   clean.providers = clean.providers.map(normalizeProvider);
   clean.models = clean.models.map(normalizeModel);
   clean.warp = normalizeWarp(clean.warp);
+  clean.modelLists = clean.modelLists.map(normalizeTarget);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(clean, null, 2)}\n`, { mode: 0o600 });
@@ -230,6 +267,172 @@ function normalizeModel(model) {
     enabled: model.enabled !== false,
     params: isPlainObject(model.params) ? model.params : {},
   };
+}
+
+function normalizeTarget(target) {
+  return {
+    id: listId(target.id) || newId("lst"),
+    name: targetName(target.name),
+    description: targetDescription(target.description),
+    models: Array.isArray(target.models) ? target.models.map(normalizeModel) : [],
+  };
+}
+
+/** A list with no name cannot be told from another, so it is never stored empty. */
+function targetName(name, fallback = DEFAULT_TARGET_NAME) {
+  return String(name ?? "").trim() || fallback;
+}
+
+/** One line has to be enough: past this, nothing on screen would show it whole. */
+export const MAX_DESCRIPTION = 160;
+
+/**
+ * What this list is for, in the user's own words — the answer to "which one do I
+ * switch to?", which a name alone rarely gives.
+ *
+ * Empty is a legitimate value, unlike a name: a list nobody has explained yet
+ * says nothing rather than making something up. Newlines and runs of spaces are
+ * flattened because every place this is shown is a single line.
+ */
+function targetDescription(description) {
+  return String(description ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_DESCRIPTION);
+}
+
+/**
+ * Reconciles the model lists with the chain in use.
+ *
+ * `config.models` stays the one source of truth for what the proxy serves: the
+ * active list is a *mirror* of it, refreshed here on every load and save, and
+ * the other lists are the stash holding the chains that are not in use. That way
+ * a hand-edited `models` array — and every screen that mutates it — keeps working
+ * without knowing model lists exist. `switchTarget` is the only thing allowed to
+ * write in the other direction.
+ */
+function syncTargets(config) {
+  if (!Array.isArray(config.modelLists) || !config.modelLists.length) {
+    config.modelLists = [{ id: newId("lst"), name: DEFAULT_TARGET_NAME, description: "", models: [] }];
+  }
+  const active = config.modelLists.find((entry) => entry.id === config.activeListId) ?? config.modelLists[0];
+  config.activeListId = active.id;
+  active.models = config.models.map((entry) => ({ ...entry }));
+  return config;
+}
+
+/** The list in use, where it sits in the lineup, and how many there are. */
+export function activeTarget(config) {
+  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
+  const index = Math.max(0, targets.findIndex((entry) => entry.id === config.activeListId));
+  return { target: targets[index] ?? null, index, total: targets.length };
+}
+
+/** Appends a list holding `models`, and makes it the one in use. */
+function pushTarget(config, name, models, description = "") {
+  syncTargets(config); // the chain on screen goes back into the list it belongs to
+  const target = {
+    id: newId("lst"),
+    name: targetName(name, `list ${config.modelLists.length + 1}`),
+    description: targetDescription(description),
+    models,
+  };
+  config.modelLists.push(target);
+  config.activeListId = target.id;
+  config.models = models.map((entry) => ({ ...entry }));
+  return target;
+}
+
+/** Adds an empty list and makes it the one in use. Returns it. */
+export function addTarget(config, name) {
+  return pushTarget(config, name, []);
+}
+
+/**
+ * Adds a copy of the chain in use — same models, same order — and switches to it,
+ * for trying a variant of a list that already works.
+ *
+ * The copies are new entries with ids of their own, so each list keeps its own
+ * counters: a variant starts from zero rather than inheriting traffic it never
+ * served. The note comes along, since a variant is tried for the same job as the
+ * list it came from — and editing one line beats retyping it from memory.
+ */
+export function copyTarget(config, name) {
+  const { target: from } = activeTarget(config);
+  return pushTarget(
+    config,
+    name,
+    config.models.map((entry) => ({ ...entry, id: newId("mdl") })),
+    from?.description,
+  );
+}
+
+/**
+ * Removes a list. The last one is never removed — something has to be served —
+ * and removing the live one hands the chain over to the list that takes its place.
+ */
+export function deleteTarget(config, targetId) {
+  if (!Array.isArray(config.modelLists) || config.modelLists.length < 2) return false;
+  const index = config.modelLists.findIndex((entry) => entry.id === targetId);
+  if (index < 0) return false;
+  const wasActive = config.modelLists[index].id === config.activeListId;
+  config.modelLists.splice(index, 1);
+  if (wasActive) {
+    const next = config.modelLists[Math.min(index, config.modelLists.length - 1)];
+    config.activeListId = next.id;
+    config.models = next.models.map((entry) => ({ ...entry }));
+  }
+  return true;
+}
+
+/**
+ * Every model id any list holds — not just the live chain.
+ *
+ * What the counters are pruned against when the proxy starts: a model parked in
+ * another list is not an obsolete one, and its history has to survive being
+ * switched away from.
+ */
+export function knownModelIds(config) {
+  const ids = new Set(config.models.map((entry) => entry.id));
+  for (const target of Array.isArray(config.modelLists) ? config.modelLists : []) {
+    for (const entry of target.models) ids.add(entry.id);
+  }
+  return ids;
+}
+
+export function renameTarget(config, targetId, name) {
+  const target = config.modelLists.find((entry) => entry.id === targetId);
+  if (!target) return false;
+  target.name = targetName(name, target.name);
+  return true;
+}
+
+/**
+ * Sets what a list is for. Blank is accepted and clears it: a note that no longer
+ * describes the chain is worse than none, so taking it back has to be possible.
+ */
+export function describeTarget(config, targetId, description) {
+  const target = config.modelLists.find((entry) => entry.id === targetId);
+  if (!target) return false;
+  target.description = targetDescription(description);
+  return true;
+}
+
+/** Parks the current chain in its own list, then makes `targetId`'s chain the live one. */
+export function switchTarget(config, targetId) {
+  const next = config.modelLists.find((entry) => entry.id === targetId);
+  if (!next || next.id === config.activeListId) return false;
+  syncTargets(config);
+  config.activeListId = next.id;
+  config.models = next.models.map((entry) => ({ ...entry }));
+  return true;
+}
+
+/** Switches to the list `delta` away, wrapping at both ends. */
+export function cycleTarget(config, delta) {
+  const { index, total } = activeTarget(config);
+  if (total < 2) return false;
+  return switchTarget(config, config.modelLists[(index + delta + total) % total].id);
 }
 
 /** An `env:NAME` value is read from the environment at call time, never stored. */

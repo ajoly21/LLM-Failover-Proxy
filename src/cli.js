@@ -1,6 +1,19 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
+import {
+  activeTarget,
+  configExists,
+  configPath,
+  describeKey,
+  describeTarget,
+  inlineKeys,
+  loadConfig,
+  providerLabel,
+  resolveSecret,
+  saveConfig,
+  statsPathFor,
+  switchTarget,
+} from "./config.js";
 import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
@@ -25,8 +38,11 @@ const pad = (text, width) => `${text}${" ".repeat(Math.max(0, width - stripAnsi(
 function table(headers, rows) {
   if (!rows.length) return;
   const widths = headers.map((header, index) => Math.max(stripAnsi(header).length, ...rows.map((row) => stripAnsi(String(row[index] ?? "")).length)));
-  say(`  ${headers.map((header, index) => c.gray(pad(header, widths[index]))).join("  ")}`);
-  for (const row of rows) say(`  ${row.map((cell, index) => pad(String(cell ?? ""), widths[index])).join("  ")}`);
+  // The last column is never padded: nothing lines up after it, and a column
+  // holding a sentence would otherwise trail spaces to the width of the longest.
+  const cell = (value, index) => (index === widths.length - 1 ? String(value ?? "") : pad(String(value ?? ""), widths[index]));
+  say(`  ${headers.map((header, index) => c.gray(cell(header, index))).join("  ")}`);
+  for (const row of rows) say(`  ${row.map(cell).join("  ")}`);
 }
 
 const yesNo = (value) => (value ? c.green("yes") : c.red("no"));
@@ -40,11 +56,15 @@ const keyCell = (provider) => {
 };
 
 export async function showStatus(config) {
+  const { target: list, total: lists } = activeTarget(config);
   say("");
   say(`  ${c.bold(c.green("llm-failover-proxy"))} ${c.gray("— OpenAI-compatible proxy with provider failover")}`);
   say(
     `  ${c.gray("config:")} ${config.__file}   ${c.gray("listen:")} http://${config.server.host}:${config.server.port}` +
-      `   ${c.gray("providers:")} ${config.providers.length}   ${c.gray("models:")} ${config.models.length}`,
+      `   ${c.gray("providers:")} ${config.providers.length}   ${c.gray("models:")} ${config.models.length}` +
+      // Which of several chains these numbers describe, so a chain that looks
+      // wrong reads as "the other list is live" rather than as lost models.
+      (lists > 1 ? `   ${c.gray("list:")} ${list.name} ${c.gray(`(${lists} in all)`)}` : ""),
   );
   const envFile = envPathFor(config.__file);
   say(`  ${c.gray("keys:")} ${envFile} ${fs.existsSync(envFile) ? c.gray("(found)") : c.yellow("(no .env yet)")}`);
@@ -83,7 +103,12 @@ export async function showStatus(config) {
   }
 
   say("");
-  say(`${c.bold("Model chain")} ${c.gray("(order = failover priority)")}`);
+  say(
+    `${c.bold("Model chain")}${lists > 1 ? ` ${c.gray("— list")} ${list.name}` : ""} ${c.gray("(order = failover priority)")}` +
+      // Where the other lists are, and how to serve one, since this report shows
+      // the live chain only.
+      (lists > 1 ? `   ${c.gray("·")} ${c.cyan("llmfp lists")} ${c.gray("for the others")}` : ""),
+  );
   if (!config.models.length) say(c.gray("  (none)"));
   else {
     table(
@@ -116,6 +141,277 @@ export async function showStatus(config) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Model lists without the UI: `lists`, `describe` and `use`           *
+ * ------------------------------------------------------------------ */
+
+/** How lists are typed on a command line, and printed when one is not found. */
+const listMenu = (targets) => targets.map((entry, index) => `${index + 1}. ${entry.name}`).join("   ");
+
+/** The lists of a config, whatever shape the object is in. */
+const listsOf = (config) => (Array.isArray(config.modelLists) ? config.modelLists : []);
+
+/** A name as it has to be typed back: quoted only when it would not survive a shell. */
+const asArgument = (name) => (/^[A-Za-z0-9._-]+$/.test(name) ? name : `"${name}"`);
+
+/**
+ * Which list a `use <name|index>` argument means.
+ *
+ * Three ways to say it, tried in that order: the number the `lists` table prints,
+ * the exact name, or enough of the name to be unambiguous — `cheap` for
+ * `cheap-and-fast` is the point of a shorthand. Anything matching two lists is
+ * refused rather than guessed at: the wrong guess serves the wrong chain.
+ *
+ * Returns `{ target }` or `{ error }`, never throws: the caller decides whether
+ * that becomes a message or a JSON payload.
+ */
+export function findTarget(targets, selector) {
+  const query = String(selector ?? "").trim();
+  if (!query) return { error: "which list? give a name or a number" };
+
+  if (/^\d+$/.test(query)) {
+    const index = Number(query) - 1;
+    const target = targets[index];
+    return target ? { target } : { error: `there is no list ${query}, only ${targets.length}` };
+  }
+
+  const wanted = query.toLowerCase();
+  const exact = targets.find((entry) => entry.name.toLowerCase() === wanted);
+  if (exact) return { target: exact };
+
+  const partial = targets.filter((entry) => entry.name.toLowerCase().includes(wanted));
+  if (partial.length === 1) return { target: partial[0] };
+  if (partial.length > 1) return { error: `"${query}" matches ${partial.map((entry) => entry.name).join(", ")} — say which one` };
+  return { error: `no list called "${query}"` };
+}
+
+/**
+ * The lists in this configuration, and which one the proxy serves. The `←→` of
+ * the UI, for a shell: the numbers printed here are what `use` accepts, and the
+ * order is the order the arrows cycle through.
+ *
+ * `WHEN TO USE` is what makes this report answer the question it is opened with —
+ * not "what lists are there" but "which one do I want now". A list nobody has
+ * described says so, and says which key writes it.
+ */
+export function showLists(config, { json = false } = {}) {
+  const targets = listsOf(config);
+  const rows = targets.map((entry, index) => ({
+    index: index + 1,
+    name: entry.name,
+    active: entry.id === config.activeListId,
+    description: entry.description || "",
+    // The active list mirrors `config.models`, so both read the same numbers.
+    models: entry.models.length,
+    enabled: entry.models.filter((model) => model.enabled).length,
+  }));
+
+  if (json) {
+    const live = rows.find((row) => row.active) ?? null;
+    process.stdout.write(`${JSON.stringify({ active: live?.name ?? null, activeIndex: live?.index ?? null, total: rows.length, lists: rows }, null, 2)}\n`);
+    return;
+  }
+
+  say("");
+  say(`  ${c.bold("Model lists")} ${c.gray("— the active one is the chain the proxy serves")}`);
+  if (!rows.length) say(c.gray("  (none)"));
+  else {
+    table(
+      ["#", "NAME", "MODELS", "ON", "ACTIVE", "WHEN TO USE"],
+      rows.map((row) => [
+        row.index,
+        row.active ? c.bold(row.name) : row.name,
+        row.models,
+        row.enabled,
+        row.active ? c.green("yes") : c.gray("-"),
+        row.description ? row.description : c.gray("-"),
+      ]),
+    );
+  }
+  say("");
+  say(`  ${c.gray("switch with")} ${c.cyan("llmfp use <name|index>")}   ${c.gray("· the chain itself is in")} ${c.cyan("llmfp status")}`);
+  if (rows.some((row) => !row.description)) {
+    say(`  ${c.gray("a list with no note is one you will have to open to understand — press")} ${c.cyan("w")} ${c.gray("on Models lists to write it")}`);
+  }
+  say("");
+}
+
+/* ------------------------------------------------------------------ *
+ * `describe`: what each list is for, for whoever has to choose        *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Reads or writes what a list is for, by how many words it is given:
+ *
+ *   describe                        every list, its note, and the command to serve it
+ *   describe <name|index>           that list's note, on its own, ready to be piped
+ *   describe <name|index> <text>    says when that list should be the one serving
+ *   describe <name|index> ""        takes the note back
+ *
+ * The no-argument form is the one written for an agent rather than for a person:
+ * a name means nothing to something that did not build these chains, so the note
+ * is what it has to choose by, and the command that acts on the choice is printed
+ * under each one. It reads the same on a terminal, so there is one thing to learn.
+ */
+export function describeList(config, args = [], { json = false } = {}) {
+  const words = args.filter((word) => word !== undefined);
+  if (!words.length) return listPurposes(config, { json });
+
+  const found = findTarget(listsOf(config), words[0]);
+  if (found.error) {
+    refuse(found.error, listsOf(config), { json });
+    return;
+  }
+  // Two words in means the rest is the note, even when the rest is empty: that is
+  // how a note is taken back, and it has to be told apart from asking to read one.
+  if (words.length < 2) return readNote(found.target, { json });
+  return writeNote(config, found.target, words.slice(1).join(" "), { json });
+}
+
+/** Shared refusal: same message, same exit code, whichever form was used. */
+function refuse(error, targets, { json }) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error, lists: targets.map((entry) => entry.name) }, null, 2)}\n`);
+  } else {
+    say("");
+    say(`  ${c.red(error)}`);
+    say(`  ${c.gray("lists:")} ${listMenu(targets)}`);
+    say("");
+  }
+  process.exitCode = 1;
+}
+
+/** Every list, purpose first. One block each, so nothing has to be lined up to be read. */
+function listPurposes(config, { json }) {
+  const targets = listsOf(config);
+  const rows = targets.map((entry, index) => ({
+    index: index + 1,
+    name: entry.name,
+    description: entry.description || "",
+    models: entry.models.length,
+    enabled: entry.models.filter((model) => model.enabled).length,
+    active: entry.id === config.activeListId,
+    // Spelled out rather than left to be assembled: a caller that reads this has
+    // one less thing to get wrong, quoting included.
+    use: `llmfp use ${asArgument(entry.name)}`,
+  }));
+
+  if (json) {
+    const live = rows.find((row) => row.active) ?? null;
+    process.stdout.write(`${JSON.stringify({ active: live?.name ?? null, total: rows.length, lists: rows }, null, 2)}\n`);
+    return;
+  }
+
+  say("");
+  say(`  ${c.bold("Model lists")} ${c.gray("— what each one is for. Pick by the note, then run the command under it.")}`);
+  if (!rows.length) say(c.gray("  (none)"));
+  for (const row of rows) {
+    say("");
+    say(
+      `  ${c.bold(row.name)} ${c.gray(`(${row.index}/${rows.length} · ${row.models} model(s), ${row.enabled} enabled)`)}` +
+        (row.active ? `   ${c.green("serving now")}` : ""),
+    );
+    // A list nobody has explained says so, and says what would fix it: the note is
+    // the whole point of this report, so its absence is the news.
+    if (row.description) say(`    ${row.description}`);
+    else say(`    ${c.yellow("no note yet")} ${c.gray(`— ${c.cyan(`llmfp describe ${asArgument(row.name)} "when this list should serve"`)}`)}`);
+    if (!row.active) say(`    ${c.cyan(row.use)}`);
+  }
+  say("");
+}
+
+/** One note, and nothing else: `NOTE=$(llmfp describe cheap)` has to work. */
+function readNote(target, { json }) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ name: target.name, description: target.description || "" }, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${target.description || ""}\n`);
+}
+
+function writeNote(config, target, description, { json }) {
+  describeTarget(config, target.id, description);
+  saveConfig(config);
+  const saved = target.description;
+
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ ok: true, name: target.name, description: saved }, null, 2)}\n`);
+    return;
+  }
+  say("");
+  if (saved) {
+    say(`  ${c.green("saved")} ${c.gray("what")} ${c.bold(target.name)} ${c.gray("is for")}`);
+    say(`    ${saved}`);
+  } else {
+    say(`  ${c.gray("cleared the note on")} ${c.bold(target.name)}`);
+  }
+  say("");
+}
+
+/**
+ * Serves another list, from a script or a shell. Exactly what `←→` does in the
+ * UI: the chain is swapped in the file, and a proxy already running picks it up
+ * through its config watcher, so nothing has to be restarted.
+ *
+ * Exits non-zero when the argument names no list, so a script can branch on it.
+ */
+export function useList(config, selector, { json = false } = {}) {
+  const targets = listsOf(config);
+  const found = findTarget(targets, selector);
+
+  if (found.error) {
+    refuse(found.error, targets, { json });
+    return;
+  }
+
+  // Already live: saving would rewrite the file for nothing, and a watcher would
+  // reload for nothing with it.
+  const already = found.target.id === config.activeListId;
+  if (!already) {
+    switchTarget(config, found.target.id);
+    saveConfig(config);
+  }
+
+  const { index, total } = activeTarget(config);
+  const enabled = config.models.filter((entry) => entry.enabled).length;
+
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: true,
+          changed: !already,
+          active: found.target.name,
+          description: found.target.description || "",
+          index: index + 1,
+          total,
+          models: config.models.length,
+          enabled,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
+
+  say("");
+  say(
+    `  ${already ? c.gray("already serving") : c.green("now serving")} ${c.bold(found.target.name)} ` +
+      `${c.gray(`(${index + 1}/${total})`)}   ${c.gray(`${config.models.length} model(s), ${enabled} enabled`)}`,
+  );
+  // What this list is for, echoed back: the one line that says whether the switch
+  // was the one meant, which a name matched on a fragment cannot.
+  if (found.target.description) say(`  ${c.gray(found.target.description)}`);
+  // Said only when there is something to reassure: the switch reached a proxy
+  // that is already serving, and no restart is coming.
+  const service = already ? null : daemonStatus(config.__file);
+  if (service?.running) {
+    say(`  ${c.gray(`the background proxy (pid ${service.pid}) reads the file on every request, so this is already live`)}`);
+  }
+  say("");
+}
+
+/* ------------------------------------------------------------------ *
  * Counters, `stats`, and the tail of `status`                         *
  * ------------------------------------------------------------------ */
 
@@ -136,8 +432,11 @@ async function liveStats(config) {
     if (!response.ok) return null;
     const payload = await response.json();
     // The answering proxy numbers the chain from its own configuration; this one
-    // has to read in the order of ours, the same as every other screen.
-    return { ...payload, chain: alignChain(config.models, payload.chain, (id) => providerLabel(config, id)), source: "server" };
+    // has to read in the order of ours, the same as every other screen. Anything
+    // it reported beyond our chain — another model list, or another config file
+    // altogether — is counted and left out, since these are the live list's stats.
+    const aligned = alignChain(config.models, payload.chain, (id) => providerLabel(config, id));
+    return { ...payload, chain: aligned.slice(0, config.models.length), elsewhere: aligned.length - config.models.length, source: "server" };
   } catch {
     return null;
   }
@@ -196,12 +495,17 @@ function statsFromDisk(config) {
     });
 
   const total = (key) => chain.reduce((sum, row) => sum + row[key], 0);
+  // Counters kept for models this list does not have: the other lists' history,
+  // which is read from the same file but is not this list's to report.
+  const own = new Set(config.models.map((entry) => entry.id));
+  const elsewhere = Object.keys(saved).filter((id) => !own.has(id)).length;
   return {
     source: "file",
     file,
     // Read from the configuration, not from the counters: it says where requests
     // *would* go now, which is what makes the paths below readable.
     warp: warpSummary(config),
+    elsewhere,
     recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
     updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt : null,
@@ -250,6 +554,9 @@ function printStats(stats) {
       row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
     ]),
   );
+  if (stats.elsewhere > 0) {
+    say(c.gray(`  ${stats.elsewhere} more model(s) served, in another list or another config — not counted above`));
+  }
 
   printRecent(stats.recent);
 }

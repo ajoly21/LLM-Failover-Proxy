@@ -203,6 +203,60 @@ test("stats file: written next to the config, restricted to configured models", 
   }
 });
 
+test("a chain parked in another model list keeps its counters across a restart", async () => {
+  // The counters are pruned on startup against the models the config still has.
+  // With several model lists the live chain is only one of them, so pruning
+  // against it alone drops the history of every list you are not currently on —
+  // and the next write, once the other list serves anything, makes that permanent.
+  // "Counters survive restarts" has to hold for the lists you switch away from.
+  const parked = await startMock("ok", { name: "parked" });
+  const live = await startMock("ok", { name: "live" });
+  const proxy = await startProxy(assemble([backend(parked, { model: "m-1", alias: "a" })]));
+  try {
+    await postJson(`${proxy.url}/v1/chat/completions`, CHAT);
+    flushStats();
+    assert.equal((await statsOf(proxy.file)).entries.mdl_parked.successes, 1, "served once, and recorded");
+
+    // That chain is parked in one list and a second one takes over — what the
+    // The Models lists screen writes when you add a list and fill it.
+    const config = JSON.parse(await fs.readFile(proxy.file, "utf8"));
+    const before = config.models;
+    const other = backend(live, { model: "m-2", alias: "b" });
+    config.providers.push(other.provider);
+    config.models = [other.model];
+    config.modelLists = [
+      { id: "lst_parked", name: "served-before", models: before },
+      { id: "lst_live", name: "in-use", models: [other.model] },
+    ];
+    config.activeListId = "lst_live";
+    await fs.writeFile(proxy.file, JSON.stringify(config));
+    await proxy.stop();
+
+    const restarted = await startProxy({ reuse: proxy.file });
+    try {
+      // Traffic on the list now live is what rewrites the file: whatever startup
+      // decided to forget is forgotten for good at this point.
+      await postJson(`${restarted.url}/v1/chat/completions`, CHAT);
+      flushStats();
+
+      const after = await statsOf(proxy.file);
+      assert.equal(after.entries.mdl_live.successes, 1, "the live list records as usual");
+      assert.ok(after.entries.mdl_parked, "and the parked list's history is still there");
+      assert.equal(after.entries.mdl_parked.successes, 1, "unchanged, since nothing reached it");
+
+      // Kept on disk, but not counted against the list in use.
+      const stats = await getStats(restarted);
+      assert.deepEqual(stats.chain.map((row) => row.model), ["m-2"]);
+      assert.equal(stats.totals.successes, 1);
+    } finally {
+      await restarted.stop();
+    }
+  } finally {
+    await fs.rm(proxy.dir, { recursive: true, force: true });
+    await Promise.all([parked.close(), live.close()]);
+  }
+});
+
 test("a corrupt or hand-edited stats file never breaks startup", async () => {
   const mock = await startMock("ok", { name: "p" });
   const proxy = await startProxy(assemble([backend(mock, { model: "m-1", alias: "a" })]));

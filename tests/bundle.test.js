@@ -160,7 +160,7 @@ test("the bundled UI mounts and renders its home screen", options, async () => {
     // Guards the whole Ink/React graph inside the bundle: a broken `require`
     // shim or a missing dependency shows up here and nowhere else.
     assert.match(stdout, /llm-failover-proxy/);
-    assert.match(stdout, /Models & priority/);
+    assert.match(stdout, /Models lists/);
     assert.match(stdout, /Start the server/);
     assert.match(stdout, /providers 1/);
     assert.doesNotMatch(stdout, /sk-secret-1234567890/, "keys stay masked in the UI too");
