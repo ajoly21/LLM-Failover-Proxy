@@ -193,6 +193,7 @@ llm-failover-proxy setup        run the setup wizard again
 llm-failover-proxy status       what is configured, what is running, live counters
 llm-failover-proxy stats        just the counters table, then back to the shell
 llm-failover-proxy lists        the model lists, and which one is being served
+llm-failover-proxy describe     what each list is for, and how to serve it
 llm-failover-proxy use <name>   serve another model list, by name or by its number
 llm-failover-proxy logs         end of the background log
 llm-failover-proxy stop         stop the background proxy
@@ -313,6 +314,38 @@ So a list carries one line of your own words, the same way an MCP server carries
 ```
 
 Write it for the version of you who has forgotten why the list exists. A copy inherits the note, because a variant is tried for the same job as the list it came from — and a note that stopped being true is worse than none, so blank clears it.
+
+### `llmfp describe`: the report something else chooses by
+
+The notes are worth writing because something other than you reads them. `llmfp describe` prints every list purpose-first, with the command that serves it underneath — which is all an agent, a deploy script or a colleague needs to pick the right chain without opening the config:
+
+```
+$ llmfp describe
+  Model lists — what each one is for. Pick by the note, then run the command under it.
+
+  free-only (1/3 · 11 model(s), 11 enabled)
+    everyday work — free tiers first, nothing metered
+    llmfp use free-only
+
+  paid-fallback (2/3 · 4 model(s), 4 enabled)   serving now
+    the day every free tier is out of quota, and it has to answer
+
+  on the plane (3/3 · 2 model(s), 2 enabled)
+    no note yet — llmfp describe "on the plane" "when this list should serve"
+    llmfp use "on the plane"
+```
+
+The same command writes them, so whatever built a chain can explain it in the same breath:
+
+```bash
+llmfp describe                              # every list, its note, and how to serve it
+llmfp describe free-only                    # just that note, on its own line, ready to pipe
+llmfp describe free-only "everyday work"    # says when that list should be the one serving
+llmfp describe free-only ""                 # takes the note back
+llmfp describe --json                        # the same, with a ready-to-run `use` per list
+```
+
+Reading and writing are told apart by how many words arrive, not by the note being blank — which is what leaves `""` free to mean *clear it*. A name that would not survive a shell is quoted in every command the report prints, so the line can be pasted as it stands. An unknown name exits non-zero, the same as `use`.
 
 **None of this needs the UI**, for a script or a shell you want back: `llmfp lists` prints the lists with their notes and marks the one being served, `llmfp use <name|index>` switches to another — by its number, its name, or enough of the name to be unambiguous.
 
