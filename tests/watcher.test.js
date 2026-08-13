@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, moveModel, saveConfig } from "../src/config.js";
+import { addTarget, cycleTarget, loadConfig, moveModel, saveConfig } from "../src/config.js";
 import { resetEnvCache } from "../src/env.js";
 import { startServer, watchPath } from "../src/server.js";
 
@@ -116,6 +116,59 @@ test("a request is answered with the file on disk, even with the watcher dead", 
       const order = answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
       assert.deepEqual(order, [`a${first.slice(-1)}`, `a${second.slice(-1)}`], "the request read the file, not a stale copy");
     }
+  } finally {
+    app.server.closeAllConnections?.();
+    await new Promise((resolve) => app.server.close(resolve));
+    resetEnvCache();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("switching target list swaps the chain a running proxy serves", async () => {
+  // The point of having several lists: switching one in the UI has to reach the
+  // proxy already running, the same way reordering the chain does. Nothing in the
+  // server knows about target lists — it reads `models`, which is what a switch
+  // rewrites — and this is the test that says so.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-targets-"));
+  const file = path.join(dir, "config.json");
+  const model = (n) => ({ id: `mdl_${n}`, providerId: "prov_1", model: `m-${n}`, alias: `a${n}`, kind: "chat", enabled: true, params: {} });
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      server: { host: "127.0.0.1", port: 0, logLevel: "error" },
+      providers: [{ id: "prov_1", name: "p", type: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKey: null, headers: {}, enabled: true }],
+      models: [model(1)],
+    }),
+  );
+
+  // A second list holding a different chain, exactly as the screen builds it.
+  const seed = loadConfig(file);
+  addTarget(seed, "other");
+  seed.models.push(model(2));
+  saveConfig(seed, file);
+
+  const app = await startServer({ configFile: file, statsFile: null });
+  const { port } = app.server.address();
+  const served = async () => {
+    const answer = await fetch(`http://127.0.0.1:${port}/v1/models`).then((response) => response.json());
+    return answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+  };
+  try {
+    assert.deepEqual(await served(), ["a2"], "the list in use when the server started");
+
+    // One press of ← in the UI.
+    const config = loadConfig(file);
+    assert.equal(cycleTarget(config, -1), true);
+    saveConfig(config, file);
+    assert.ok(await waitFor(() => app.config.models[0]?.model === "m-1"), "the switch never reached the running proxy");
+    assert.deepEqual(await served(), ["a1"], "and the other chain is being served now");
+
+    // And back, so the parked chain is proven to have survived the round trip.
+    const back = loadConfig(file);
+    assert.equal(cycleTarget(back, 1), true);
+    saveConfig(back, file);
+    assert.ok(await waitFor(() => app.config.models[0]?.model === "m-2"));
+    assert.deepEqual(await served(), ["a2"]);
   } finally {
     app.server.closeAllConnections?.();
     await new Promise((resolve) => app.server.close(resolve));

@@ -3,6 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import { h } from './h.js';
 import { COLOR, SYMBOL, cell, windowAround } from './theme.js';
 import { useLayout } from './size.js';
+import { activeTarget } from '../config.js';
 import { daemonStatus } from '../daemon.js';
 
 /**
@@ -252,6 +253,7 @@ export function Banner({ config, message }) {
   // Read once per mount: coming back to the menu refreshes it.
   const [service] = useState(() => daemonStatus(config.__file));
   const layout = useLayout();
+  const { target: list, total: lists } = activeTarget(config);
 
   const counts = h(
     Text,
@@ -260,6 +262,10 @@ export function Banner({ config, message }) {
     h(Text, null, String(config.providers.length)),
     h(Text, { dimColor: true }, '   models '),
     h(Text, null, String(config.models.length)),
+    // Named only once there is more than one list to be on: until then, which
+    // one is live is not a question anybody has.
+    lists > 1 ? h(Text, { dimColor: true }, '   list ') : null,
+    lists > 1 ? h(Text, { color: COLOR.accent }, list.name) : null,
     h(Text, { dimColor: true }, '   '),
     service.running ? h(Text, { color: COLOR.ok }, `up (pid ${service.pid})`) : h(Text, { dimColor: true }, 'stopped'),
   );

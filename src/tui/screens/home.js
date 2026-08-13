@@ -8,7 +8,7 @@ import { updateCommandLine } from '../../update.js';
 
 const ITEMS = [
   { key: 'providers', label: 'Providers', hint: 'endpoints, API keys, protocol' },
-  { key: 'models', label: 'Target lists', hint: 'failover chain, live latency tests' },
+  { key: 'models', label: 'Target lists', hint: 'failover chains, switch them, live tests' },
   { key: 'settings', label: 'Settings', hint: 'port, timeouts, failover policy' },
   { key: 'status', label: 'Status & stats', hint: 'persisted counters and cooldowns' },
   { key: 'setup', label: 'Setup wizard', hint: 'add the default chain, paste keys' },

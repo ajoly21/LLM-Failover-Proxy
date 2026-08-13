@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { getProvider, loadConfig, resolveSecret, statsPathFor } from "./config.js";
+import { getProvider, knownModelIds, loadConfig, resolveSecret, statsPathFor } from "./config.js";
 import { clearRuntime, writeRuntime } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
 import { openAIError } from "./errors.js";
@@ -230,7 +230,9 @@ export function createServer({ configFile, statsFile } = {}) {
   // Counters and cooldowns are restored from disk; `statsFile: null` explicitly
   // unbinds any previous file and keeps everything in memory.
   enableStatsPersistence(statsFile === null ? null : statsFile || statsPathFor(config.__file), {
-    knownIds: new Set(config.models.map((entry) => entry.id)),
+    // Every target list, not just the live one: a model parked in another list is
+    // not obsolete, and its history has to survive being switched away from.
+    knownIds: knownModelIds(config),
   });
 
   // Both files are also checked when a request arrives, so `stamp` has to be
