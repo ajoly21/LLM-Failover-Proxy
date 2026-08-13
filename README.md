@@ -283,7 +283,8 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 
 ```
   list  ‹ cheap-and-fast ›  2/3
-  ←→ switch list · n new list · c copy list · r rename list · x delete list
+  everyday work — free tiers first, nothing metered in the chain
+  ←→ switch list · n new list · c copy list · r rename list · w when to use · x delete list
 ```
 
 Every key that acts on a list is written **there**, under the name of the list it acts on — the hints at the foot of the screen are the chain's own keys, and the two are never mixed. `←→` switches the list being served, `n` starts a new empty one, `c` copies the one you are on, `r` renames it, `x` removes it — the name is typed straight into that line, no form, no second screen. The list you switch to becomes the chain the proxy answers with immediately: a background instance picks it up through its config watcher, with no restart, so switching lists **is** how you compare them under real traffic. The other lists sit in the config file untouched until you come back to them.
@@ -294,25 +295,41 @@ Every key that acts on a list is written **there**, under the name of the list i
 | `n`  | a new **empty** list, to fill with `a`                                                                                     |
 | `c`  | a **copy** of this list — same models, same order — for trying a variant. The copies are new entries, so the copy's counters start at zero rather than inheriting traffic it never served |
 | `r`  | rename this list                                                                                                           |
+| `w`  | **when to use** this list: one line saying what it is for, shown under its name and everywhere a list is picked. Blank clears it |
 | `x`  | delete this list, after a `y/n`. Never offered for the last one: something has to be served. Deleting the live list hands the chain to the list that takes its place |
 
 `c` rather than a shifted `n`: `N` reads as a second way to say "new list", and got pressed for one.
 
-**Both of these work without the UI**, for a script or a shell you want back: `llmfp lists` prints the lists and marks the one being served, `llmfp use <name|index>` switches to another — by its number, its name, or enough of the name to be unambiguous.
+### Say when each list should be the one serving
+
+A name is not a reason. Three months after building `fast-2`, `cheap-and-fast` and `local`, the question you have in front of the switcher is not *which lists exist* — it is **which one do I want right now**, and no name answers that on its own.
+
+So a list carries one line of your own words, the same way an MCP server carries a description telling a model when to call it: `w`, type it, `enter`. It is shown under the list name while you switch, in `llmfp lists`, and echoed back by `llmfp use` so a name matched on a fragment confirms itself.
+
+```
+  1  free-only       11  11  -    everyday work — free tiers first, nothing metered
+  2  paid-fallback    4   4  yes  the day every free tier is out of quota, and it has to answer
+  3  local-only       2   2  -    on the plane, or when nothing may leave the machine
+```
+
+Write it for the version of you who has forgotten why the list exists. A copy inherits the note, because a variant is tried for the same job as the list it came from — and a note that stopped being true is worse than none, so blank clears it.
+
+**None of this needs the UI**, for a script or a shell you want back: `llmfp lists` prints the lists with their notes and marks the one being served, `llmfp use <name|index>` switches to another — by its number, its name, or enough of the name to be unambiguous.
 
 ```
 $ llmfp lists
 Model lists — the active one is the chain the proxy serves
-  #  NAME            MODELS  ON  ACTIVE
-  1  default         11      11  -
-  2  cheap-and-fast  4       3   yes
+  #  NAME            MODELS  ON  ACTIVE  WHEN TO USE
+  1  default         11      11  -       everything, in failover order
+  2  cheap-and-fast  4       3   yes     everyday work — free tiers first, nothing metered
 
 $ llmfp use default
   now serving default (1/2)   11 model(s), 11 enabled
+  everything, in failover order
   the background proxy (pid 24188) reads the file on every request, so this is already live
 ```
 
-`use` exits non-zero when the name matches no list, or two, so a deploy script can branch on it; `lists --json` and `use --json` give the same facts as machine-readable output.
+`use` exits non-zero when the name matches no list, or two, so a deploy script can branch on it; `lists --json` and `use --json` give the same facts as machine-readable output, the note included, which is what a shell picker needs to offer more than bare names.
 
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
@@ -340,7 +357,7 @@ Two files, side by side, **configuration** and **secrets** are deliberately kept
 
 | File                                    | Contents                                                                                                                                | Commit it?               |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `config.json`                           | providers, models, priority order, model lists, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                          | yes, if you want         |
+| `config.json`                           | providers, models, priority order, model lists and what each is for, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                          | yes, if you want         |
 | `.env`                                  | the actual API keys, one per line, `0600`                                                                                               | **never**                |
 | `.env.example`                          | the variables the default chain expects, with links to get each key                                                                     | shipped with the package |
 | `<config>.stats.json`                   | counters and cooldowns, so they survive restarts                                                                                        | no                       |
@@ -361,8 +378,18 @@ Every screen that takes a key writes it to the `.env` and stores only an `env:NA
   "models": [ /* the chain in use, in priority order */ ],
   "activeListId": "lst_9f3c1a20",
   "modelLists": [
-    { "id": "lst_1b7e04d5", "name": "default", "models": [ /* parked */ ] },
-    { "id": "lst_9f3c1a20", "name": "cheap-and-fast", "models": [ /* mirrors `models` above */ ] }
+    {
+      "id": "lst_1b7e04d5",
+      "name": "default",
+      "description": "everything, in failover order", // what `w` writes: when to use this one
+      "models": [ /* parked */ ]
+    },
+    {
+      "id": "lst_9f3c1a20",
+      "name": "cheap-and-fast",
+      "description": "everyday work — free tiers first, nothing metered",
+      "models": [ /* mirrors `models` above */ ]
+    }
   ]
 }
 ```
