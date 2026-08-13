@@ -1,6 +1,18 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { activeTarget, configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
+import {
+  activeTarget,
+  configExists,
+  configPath,
+  describeKey,
+  inlineKeys,
+  loadConfig,
+  providerLabel,
+  resolveSecret,
+  saveConfig,
+  statsPathFor,
+  switchTarget,
+} from "./config.js";
 import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
@@ -83,7 +95,10 @@ export async function showStatus(config) {
 
   say("");
   say(
-    `${c.bold("Model chain")}${lists > 1 ? ` ${c.gray("— list")} ${list.name}` : ""} ${c.gray("(order = failover priority)")}`,
+    `${c.bold("Model chain")}${lists > 1 ? ` ${c.gray("— list")} ${list.name}` : ""} ${c.gray("(order = failover priority)")}` +
+      // Where the other lists are, and how to serve one, since this report shows
+      // the live chain only.
+      (lists > 1 ? `   ${c.gray("·")} ${c.cyan("llmfp lists")} ${c.gray("for the others")}` : ""),
   );
   if (!config.models.length) say(c.gray("  (none)"));
   else {
@@ -117,6 +132,136 @@ export async function showStatus(config) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Model lists without the UI: `lists` and `use`                      *
+ * ------------------------------------------------------------------ */
+
+/** How lists are typed on a command line, and printed when one is not found. */
+const listMenu = (targets) => targets.map((entry, index) => `${index + 1}. ${entry.name}`).join("   ");
+
+/**
+ * Which list a `use <name|index>` argument means.
+ *
+ * Three ways to say it, tried in that order: the number the `lists` table prints,
+ * the exact name, or enough of the name to be unambiguous — `cheap` for
+ * `cheap-and-fast` is the point of a shorthand. Anything matching two lists is
+ * refused rather than guessed at: the wrong guess serves the wrong chain.
+ *
+ * Returns `{ target }` or `{ error }`, never throws: the caller decides whether
+ * that becomes a message or a JSON payload.
+ */
+export function findTarget(targets, selector) {
+  const query = String(selector ?? "").trim();
+  if (!query) return { error: "which list? give a name or a number" };
+
+  if (/^\d+$/.test(query)) {
+    const index = Number(query) - 1;
+    const target = targets[index];
+    return target ? { target } : { error: `there is no list ${query}, only ${targets.length}` };
+  }
+
+  const wanted = query.toLowerCase();
+  const exact = targets.find((entry) => entry.name.toLowerCase() === wanted);
+  if (exact) return { target: exact };
+
+  const partial = targets.filter((entry) => entry.name.toLowerCase().includes(wanted));
+  if (partial.length === 1) return { target: partial[0] };
+  if (partial.length > 1) return { error: `"${query}" matches ${partial.map((entry) => entry.name).join(", ")} — say which one` };
+  return { error: `no list called "${query}"` };
+}
+
+/**
+ * The lists in this configuration, and which one the proxy serves. The `←→` of
+ * the UI, for a shell: the numbers printed here are what `use` accepts, and the
+ * order is the order the arrows cycle through.
+ */
+export function showLists(config, { json = false } = {}) {
+  const targets = Array.isArray(config.targets) ? config.targets : [];
+  const rows = targets.map((entry, index) => ({
+    index: index + 1,
+    name: entry.name,
+    active: entry.id === config.activeTargetId,
+    // The active list mirrors `config.models`, so both read the same numbers.
+    models: entry.models.length,
+    enabled: entry.models.filter((model) => model.enabled).length,
+  }));
+
+  if (json) {
+    const live = rows.find((row) => row.active) ?? null;
+    process.stdout.write(`${JSON.stringify({ active: live?.name ?? null, activeIndex: live?.index ?? null, total: rows.length, lists: rows }, null, 2)}\n`);
+    return;
+  }
+
+  say("");
+  say(`  ${c.bold("Model lists")} ${c.gray("— the active one is the chain the proxy serves")}`);
+  if (!rows.length) say(c.gray("  (none)"));
+  else {
+    table(
+      ["#", "NAME", "MODELS", "ON", "ACTIVE"],
+      rows.map((row) => [row.index, row.active ? c.bold(row.name) : row.name, row.models, row.enabled, row.active ? c.green("yes") : c.gray("-")]),
+    );
+  }
+  say("");
+  say(`  ${c.gray("switch with")} ${c.cyan("llmfp use <name|index>")}   ${c.gray("· the chain itself is in")} ${c.cyan("llmfp status")}`);
+  say("");
+}
+
+/**
+ * Serves another list, from a script or a shell. Exactly what `←→` does in the
+ * UI: the chain is swapped in the file, and a proxy already running picks it up
+ * through its config watcher, so nothing has to be restarted.
+ *
+ * Exits non-zero when the argument names no list, so a script can branch on it.
+ */
+export function useList(config, selector, { json = false } = {}) {
+  const targets = Array.isArray(config.targets) ? config.targets : [];
+  const found = findTarget(targets, selector);
+
+  if (found.error) {
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: found.error, lists: targets.map((entry) => entry.name) }, null, 2)}\n`);
+    } else {
+      say("");
+      say(`  ${c.red(found.error)}`);
+      say(`  ${c.gray("lists:")} ${listMenu(targets)}`);
+      say("");
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  // Already live: saving would rewrite the file for nothing, and a watcher would
+  // reload for nothing with it.
+  const already = found.target.id === config.activeTargetId;
+  if (!already) {
+    switchTarget(config, found.target.id);
+    saveConfig(config);
+  }
+
+  const { index, total } = activeTarget(config);
+  const enabled = config.models.filter((entry) => entry.enabled).length;
+
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({ ok: true, changed: !already, active: found.target.name, index: index + 1, total, models: config.models.length, enabled }, null, 2)}\n`,
+    );
+    return;
+  }
+
+  say("");
+  say(
+    `  ${already ? c.gray("already serving") : c.green("now serving")} ${c.bold(found.target.name)} ` +
+      `${c.gray(`(${index + 1}/${total})`)}   ${c.gray(`${config.models.length} model(s), ${enabled} enabled`)}`,
+  );
+  // Said only when there is something to reassure: the switch reached a proxy
+  // that is already serving, and no restart is coming.
+  const service = already ? null : daemonStatus(config.__file);
+  if (service?.running) {
+    say(`  ${c.gray(`the background proxy (pid ${service.pid}) reads the file on every request, so this is already live`)}`);
+  }
+  say("");
+}
+
+/* ------------------------------------------------------------------ *
  * Counters, `stats`, and the tail of `status`                         *
  * ------------------------------------------------------------------ */
 
@@ -138,7 +283,7 @@ async function liveStats(config) {
     const payload = await response.json();
     // The answering proxy numbers the chain from its own configuration; this one
     // has to read in the order of ours, the same as every other screen. Anything
-    // it reported beyond our chain — another target list, or another config file
+    // it reported beyond our chain — another model list, or another config file
     // altogether — is counted and left out, since these are the live list's stats.
     const aligned = alignChain(config.models, payload.chain, (id) => providerLabel(config, id));
     return { ...payload, chain: aligned.slice(0, config.models.length), elsewhere: aligned.length - config.models.length, source: "server" };

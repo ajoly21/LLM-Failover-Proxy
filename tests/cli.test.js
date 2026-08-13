@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { loadConfig, saveConfig } from "../src/config.js";
+import { addTarget, loadConfig, saveConfig } from "../src/config.js";
 import { assemble, backend, postJson, startProxy } from "./helpers.js";
 import { startMock } from "./mock-provider.js";
 
@@ -114,6 +114,99 @@ test("a cancelled attempt is lost traffic, not unavailability", async () => {
     assert.equal(asJson.recent.length, 3, "the recent calls travel in the JSON too");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("`lists` names the model lists, and `use` serves another one", async () => {
+  const mock = await startMock("ok", { name: "p" });
+  const proxy = await startProxy(assemble([backend(mock, { model: "m-1", alias: "a1" })]));
+  const where = { configFile: proxy.file, cwd: proxy.dir };
+  // A second list holding a chain of its own, exactly as the UI builds it.
+  const seed = loadConfig(proxy.file);
+  addTarget(seed, "cheap-and-fast");
+  seed.models.push({ id: "mdl_2", providerId: "prov_p", model: "m-2", alias: "a2", kind: "chat", enabled: true, params: {} });
+  saveConfig(seed, proxy.file);
+
+  const served = async () => {
+    const answer = await fetch(`${proxy.url}/v1/models`).then((response) => response.json());
+    return answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+  };
+
+  try {
+    const listed = await cli(["lists"], where);
+    assert.match(listed.stdout, /#\s+NAME\s+MODELS\s+ON\s+ACTIVE/);
+    assert.match(listed.stdout, /1\s+default\s+1\s+1\s+-/, "the list that is not being served");
+    assert.match(listed.stdout, /2\s+cheap-and-fast\s+1\s+1\s+yes/, "and the one that is");
+    assert.match(listed.stdout, /llmfp use <name\|index>/, "and how to switch without the UI");
+
+    assert.deepEqual(await served(), ["a2"], "the running proxy serves the active list");
+
+    // By number, the way `lists` prints them: the switch reaches the proxy
+    // already running through its config watcher, with nothing restarted.
+    const back = await cli(["use", "1"], where);
+    assert.match(back.stdout, /now serving default \(1\/2\)\s+1 model\(s\), 1 enabled/);
+    assert.deepEqual(loadConfig(proxy.file).models.map((entry) => entry.model), ["m-1"], "the chain in the file is the one that was asked for");
+    assert.deepEqual(await served(), ["a1"], "and the request that followed was answered from it");
+
+    // By part of a name, since that is what anyone types.
+    const partial = await cli(["use", "cheap"], where);
+    assert.match(partial.stdout, /now serving cheap-and-fast \(2\/2\)/);
+    assert.deepEqual(await served(), ["a2"]);
+
+    const again = await cli(["use", "cheap-and-fast"], where);
+    assert.match(again.stdout, /already serving cheap-and-fast/, "no switch to make, and nothing to say about a restart");
+
+    const asJson = JSON.parse((await cli(["lists", "--json"], where)).stdout);
+    assert.equal(asJson.active, "cheap-and-fast");
+    assert.equal(asJson.activeIndex, 2);
+    assert.deepEqual(
+      asJson.lists.map((entry) => entry.name),
+      ["default", "cheap-and-fast"],
+    );
+  } finally {
+    await proxy.close();
+    await mock.close();
+  }
+});
+
+test("`use` refuses a name it cannot place, and says what there was", async () => {
+  const proxy = await startProxy({ providers: [], models: [] });
+  const where = { configFile: proxy.file, cwd: proxy.dir };
+  try {
+    // Exit code 1, so a script can branch on it rather than parse the message.
+    await assert.rejects(
+      () => cli(["use", "nope"], where),
+      (err) => {
+        assert.equal(err.code, 1);
+        assert.match(err.stdout, /no list called "nope"/);
+        assert.match(err.stdout, /lists:\s+1\. default/, "and the names it could have meant");
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      () => cli(["use"], where),
+      (err) => {
+        assert.equal(err.code, 1);
+        assert.match(err.stdout, /which list\?/);
+        return true;
+      },
+    );
+
+    // Same refusal, machine-readable, for the script that asked for JSON.
+    await assert.rejects(
+      () => cli(["use", "7", "--json"], where),
+      (err) => {
+        assert.equal(err.code, 1);
+        const payload = JSON.parse(err.stdout);
+        assert.equal(payload.ok, false);
+        assert.match(payload.error, /there is no list 7/);
+        assert.deepEqual(payload.lists, ["default"]);
+        return true;
+      },
+    );
+  } finally {
+    await proxy.close();
   }
 });
 

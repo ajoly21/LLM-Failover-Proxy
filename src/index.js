@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { applyCatalog, loadCatalog } from "./catalog.js";
-import { openInterface, showDoctor, showStats, showStatus } from "./cli.js";
+import { openInterface, showDoctor, showLists, showStats, showStatus, useList } from "./cli.js";
 import { DEFAULT_PORT, configExists, configPath, loadConfig, resolveSecret, saveConfig } from "./config.js";
 import { installAutostart, logPathFor, logTail, orphaned, removeAutostart, removeServiceCopy, restartDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
@@ -27,6 +27,8 @@ const HELP = `
     disable         remove the login entry and stop the background proxy
     status          configuration, failover order, counters, service state
     stats           just the counters table, then back to the shell (--json to pipe it)
+    lists           the model lists, and which one is being served (--json too)
+    use <name|n>    serve another model list, by name or by its number in \`lists\`
     logs            show the end of the background log
     doctor          check this install: PATH, paths in the login entry, keys, service
     help, version
@@ -37,7 +39,7 @@ const HELP = `
     --port <n>       listen port (default: ${DEFAULT_PORT}; a free port is picked if taken)
     --host <addr>    listen address (default: 127.0.0.1)
     --lines <n>      how many log lines ${c.gray("(logs, default 40)")}
-    --json           machine-readable output ${c.gray("(stats, doctor)")}
+    --json           machine-readable output ${c.gray("(stats, doctor, lists, use)")}
     --path           only the PATH check ${c.gray("(doctor; what the installer runs)")}
 
   ${c.bold("Without a terminal")}
@@ -56,7 +58,9 @@ const HELP = `
 `;
 
 function parseArgs(argv) {
-  const options = { command: null, configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
+  // `args` holds the words after the command, for the one command that takes an
+  // argument of its own: `use <name|index>`.
+  const options = { command: null, args: [], configFile: undefined, port: undefined, host: undefined, daemon: false, lines: 40, json: false, pathOnly: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--config" || arg === "-c") options.configFile = argv[++i];
@@ -68,7 +72,11 @@ function parseArgs(argv) {
     else if (arg === "--path") options.pathOnly = true;
     else if (arg === "--help" || arg === "-h") options.command = "help";
     else if (arg === "--version" || arg === "-v") options.command = "version";
-    else if (!arg.startsWith("-") && !options.command) options.command = arg;
+    // A word, not a flag: the command, then whatever the command takes.
+    else if (!arg.startsWith("-")) {
+      if (!options.command) options.command = arg;
+      else options.args.push(arg);
+    }
   }
   return options;
 }
@@ -254,6 +262,20 @@ async function main() {
     case "stats":
     case "counters": {
       await showStats(loadConfig(options.configFile), { json: options.json });
+      return;
+    }
+
+    // The `←→` of the UI, for a shell: what the lists are, and which one is served.
+    case "lists": {
+      showLists(loadConfig(options.configFile), { json: options.json });
+      return;
+    }
+
+    case "use":
+    case "switch": {
+      // Joined rather than taking the first word: an unquoted `use cheap and fast`
+      // is one name, and refusing it over a shell quoting detail helps nobody.
+      useList(loadConfig(options.configFile), options.args.join(" "), { json: options.json });
       return;
     }
 
