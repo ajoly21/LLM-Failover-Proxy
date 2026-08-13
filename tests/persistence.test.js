@@ -203,9 +203,9 @@ test("stats file: written next to the config, restricted to configured models", 
   }
 });
 
-test("a chain parked in another target list keeps its counters across a restart", async () => {
+test("a chain parked in another model list keeps its counters across a restart", async () => {
   // The counters are pruned on startup against the models the config still has.
-  // With several target lists the live chain is only one of them, so pruning
+  // With several model lists the live chain is only one of them, so pruning
   // against it alone drops the history of every list you are not currently on —
   // and the next write, once the other list serves anything, makes that permanent.
   // "Counters survive restarts" has to hold for the lists you switch away from.
@@ -218,17 +218,17 @@ test("a chain parked in another target list keeps its counters across a restart"
     assert.equal((await statsOf(proxy.file)).entries.mdl_parked.successes, 1, "served once, and recorded");
 
     // That chain is parked in one list and a second one takes over — what the
-    // Target list screen writes when you add a list and fill it.
+    // The Models lists screen writes when you add a list and fill it.
     const config = JSON.parse(await fs.readFile(proxy.file, "utf8"));
     const before = config.models;
     const other = backend(live, { model: "m-2", alias: "b" });
     config.providers.push(other.provider);
     config.models = [other.model];
-    config.targets = [
-      { id: "tgt_parked", name: "served-before", models: before },
-      { id: "tgt_live", name: "in-use", models: [other.model] },
+    config.modelLists = [
+      { id: "lst_parked", name: "served-before", models: before },
+      { id: "lst_live", name: "in-use", models: [other.model] },
     ];
-    config.activeTargetId = "tgt_live";
+    config.activeListId = "lst_live";
     await fs.writeFile(proxy.file, JSON.stringify(config));
     await proxy.stop();
 

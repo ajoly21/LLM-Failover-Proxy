@@ -175,11 +175,11 @@ export function findTarget(targets, selector) {
  * order is the order the arrows cycle through.
  */
 export function showLists(config, { json = false } = {}) {
-  const targets = Array.isArray(config.targets) ? config.targets : [];
+  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
   const rows = targets.map((entry, index) => ({
     index: index + 1,
     name: entry.name,
-    active: entry.id === config.activeTargetId,
+    active: entry.id === config.activeListId,
     // The active list mirrors `config.models`, so both read the same numbers.
     models: entry.models.length,
     enabled: entry.models.filter((model) => model.enabled).length,
@@ -213,7 +213,7 @@ export function showLists(config, { json = false } = {}) {
  * Exits non-zero when the argument names no list, so a script can branch on it.
  */
 export function useList(config, selector, { json = false } = {}) {
-  const targets = Array.isArray(config.targets) ? config.targets : [];
+  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
   const found = findTarget(targets, selector);
 
   if (found.error) {
@@ -231,7 +231,7 @@ export function useList(config, selector, { json = false } = {}) {
 
   // Already live: saving would rewrite the file for nothing, and a watcher would
   // reload for nothing with it.
-  const already = found.target.id === config.activeTargetId;
+  const already = found.target.id === config.activeListId;
   if (!already) {
     switchTarget(config, found.target.id);
     saveConfig(config);

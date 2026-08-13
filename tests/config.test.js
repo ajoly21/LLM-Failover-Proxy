@@ -127,12 +127,12 @@ test('config survives a disk round-trip and keeps its order', async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('target lists park a chain and hand another one to the router', async () => {
+test('model lists park a chain and hand another one to the router', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-targets-'));
   const file = path.join(dir, 'config.json');
   const entry = (model) => ({ id: `mdl_${model}`, providerId: 'prov_1', model, alias: model, kind: 'chat', enabled: true, params: {} });
 
-  // A configuration written before target lists existed: one is made for it, so
+  // A configuration written before model lists existed: one is made for it, so
   // the chain already on disk is never the one left without a home.
   await fs.writeFile(file, JSON.stringify({ models: [entry('aa'), entry('bb')] }));
   const config = loadConfig(file);
@@ -150,22 +150,22 @@ test('target lists park a chain and hand another one to the router', async () =>
   // Both lists survive the round trip, and only the active one is live.
   const reloaded = loadConfig(file);
   assert.deepEqual(reloaded.models.map((m) => m.model), ['cc'], 'the router still reads config.models');
-  assert.deepEqual(reloaded.targets.map((t) => t.name), ['default', 'fast']);
-  assert.deepEqual(reloaded.targets[0].models.map((m) => m.model), ['aa', 'bb'], 'the parked chain is untouched');
+  assert.deepEqual(reloaded.modelLists.map((t) => t.name), ['default', 'fast']);
+  assert.deepEqual(reloaded.modelLists[0].models.map((m) => m.model), ['aa', 'bb'], 'the parked chain is untouched');
 
   // Switching puts the live chain back in its own list and loads the other.
-  assert.equal(switchTarget(reloaded, reloaded.targets[0].id), true);
+  assert.equal(switchTarget(reloaded, reloaded.modelLists[0].id), true);
   assert.deepEqual(reloaded.models.map((m) => m.model), ['aa', 'bb']);
-  assert.deepEqual(reloaded.targets[1].models.map((m) => m.model), ['cc'], 'the chain left behind was kept');
-  assert.equal(switchTarget(reloaded, reloaded.activeTargetId), false, 'switching to the current list is a no-op');
-  assert.equal(switchTarget(reloaded, 'tgt_nope'), false);
+  assert.deepEqual(reloaded.modelLists[1].models.map((m) => m.model), ['cc'], 'the chain left behind was kept');
+  assert.equal(switchTarget(reloaded, reloaded.activeListId), false, 'switching to the current list is a no-op');
+  assert.equal(switchTarget(reloaded, 'lst_nope'), false);
 
   // Reordering the live chain reorders the list it belongs to, and nothing else.
   moveModel(reloaded, 1, -1);
   saveConfig(reloaded, file);
   const again = loadConfig(file);
-  assert.deepEqual(again.targets[0].models.map((m) => m.model), ['bb', 'aa'], 'the mirror followed the chain');
-  assert.deepEqual(again.targets[1].models.map((m) => m.model), ['cc'], 'the other list did not move');
+  assert.deepEqual(again.modelLists[0].models.map((m) => m.model), ['bb', 'aa'], 'the mirror followed the chain');
+  assert.deepEqual(again.modelLists[1].models.map((m) => m.model), ['cc'], 'the other list did not move');
 
   // ←→ wraps in both directions, and a rename never leaves a list nameless.
   assert.equal(cycleTarget(again, 1), true);
@@ -173,15 +173,60 @@ test('target lists park a chain and hand another one to the router', async () =>
   assert.equal(cycleTarget(again, 1), true, 'wraps past the end');
   assert.equal(activeTarget(again).target.name, 'default');
   assert.equal(renameTarget(again, second.id, '  cheap  '), true);
-  assert.equal(again.targets[1].name, 'cheap', 'trimmed');
+  assert.equal(again.modelLists[1].name, 'cheap', 'trimmed');
   renameTarget(again, second.id, '   ');
-  assert.equal(again.targets[1].name, 'cheap', 'a blank name is refused, the old one stands');
-  assert.equal(renameTarget(again, 'tgt_nope', 'x'), false);
+  assert.equal(again.modelLists[1].name, 'cheap', 'a blank name is refused, the old one stands');
+  assert.equal(renameTarget(again, 'lst_nope', 'x'), false);
 
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('a target list can be copied and removed, and the last one always stands', async () => {
+test('lists written under the names of an older version are read, then saved under the current ones', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-legacy-'));
+  const file = path.join(dir, 'config.json');
+  const entry = (model) => ({ id: `mdl_${model}`, providerId: 'prov_1', model, alias: model, kind: 'chat', enabled: true, params: {} });
+
+  // Exactly what a 1.6 install has on disk: `targets`, `activeTargetId`, `tgt_` ids.
+  await fs.writeFile(
+    file,
+    JSON.stringify({
+      models: [entry('cc')],
+      activeTargetId: 'tgt_live',
+      targets: [
+        { id: 'tgt_parked', name: 'cheap', models: [entry('aa'), entry('bb')] },
+        { id: 'tgt_live', name: 'everything', models: [entry('cc')] },
+      ],
+    }),
+  );
+
+  const config = loadConfig(file);
+  assert.deepEqual(config.modelLists.map((list) => list.name), ['cheap', 'everything'], 'both lists came across');
+  // The list that was being served is still the one being served: the id kept
+  // its random half, so the pointer survived the rename.
+  assert.equal(activeTarget(config).target.name, 'everything');
+  assert.equal(config.activeListId, 'lst_live');
+  assert.deepEqual(config.modelLists.map((list) => list.id), ['lst_parked', 'lst_live']);
+  assert.deepEqual(config.models.map((m) => m.model), ['cc'], 'and the chain the router reads is untouched');
+
+  // Saving writes the current names, and does not leave the old ones behind.
+  saveConfig(config, file);
+  const written = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.ok(Array.isArray(written.modelLists), 'saved under modelLists');
+  assert.equal(written.activeListId, 'lst_live');
+  assert.equal('targets' in written, false, 'the old key is gone, not duplicated');
+  assert.equal('activeTargetId' in written, false);
+  assert.doesNotMatch(JSON.stringify(written), /tgt_/, 'and no id still carries the old prefix');
+
+  // Reading the file the migration wrote changes nothing further.
+  const reloaded = loadConfig(file);
+  assert.deepEqual(reloaded.modelLists.map((list) => list.id), ['lst_parked', 'lst_live']);
+  assert.equal(activeTarget(reloaded).target.name, 'everything');
+  assert.deepEqual(switchTarget(reloaded, 'lst_parked') && reloaded.models.map((m) => m.model), ['aa', 'bb'], 'the parked chain is still reachable');
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('a model list can be copied and removed, and the last one always stands', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-copy-'));
   const file = path.join(dir, 'config.json');
   const entry = (model) => ({ id: `mdl_${model}`, providerId: 'prov_1', model, alias: model, kind: 'chat', enabled: true, params: {} });
@@ -193,14 +238,14 @@ test('a target list can be copied and removed, and the last one always stands', 
   assert.equal(activeTarget(config).target.name, 'variant', 'and it is the one in use');
   // Entries of its own: each list keeps its own counters, which are kept by id.
   assert.deepEqual(config.models.map((m) => m.id).filter((id) => ['mdl_aa', 'mdl_bb'].includes(id)), []);
-  assert.equal(new Set([...config.targets.flatMap((t) => t.models.map((m) => m.id))]).size, 4, 'no id is shared between the two lists');
+  assert.equal(new Set([...config.modelLists.flatMap((t) => t.models.map((m) => m.id))]).size, 4, 'no id is shared between the two lists');
 
   // Reordering the copy does not disturb the list it came from.
   moveModel(config, 0, 1);
   saveConfig(config, file);
   const reloaded = loadConfig(file);
   assert.deepEqual(reloaded.models.map((m) => m.model), ['bb', 'aa']);
-  assert.deepEqual(reloaded.targets[0].models.map((m) => m.model), ['aa', 'bb']);
+  assert.deepEqual(reloaded.modelLists[0].models.map((m) => m.model), ['aa', 'bb']);
 
   // Counters are pruned against every list, not just the live one, so the chain
   // parked in `default` does not lose its history the next time the proxy starts.
@@ -210,21 +255,21 @@ test('a target list can be copied and removed, and the last one always stands', 
 
   // Removing the list in use hands the chain to the one that takes its place.
   assert.equal(deleteTarget(reloaded, copy.id), true);
-  assert.deepEqual(reloaded.targets.map((t) => t.name), ['default']);
+  assert.deepEqual(reloaded.modelLists.map((t) => t.name), ['default']);
   assert.deepEqual(reloaded.models.map((m) => m.model), ['aa', 'bb'], 'and that list is now being served');
   assert.equal(activeTarget(reloaded).target.name, 'default');
 
   // The last one is never removed: something has to be served.
-  assert.equal(deleteTarget(reloaded, reloaded.targets[0].id), false);
-  assert.equal(reloaded.targets.length, 1);
+  assert.equal(deleteTarget(reloaded, reloaded.modelLists[0].id), false);
+  assert.equal(reloaded.modelLists.length, 1);
 
   // Removing a list that is not the live one leaves the live chain alone.
   addTarget(reloaded, 'scratch');
-  const parked = reloaded.targets[0].id;
+  const parked = reloaded.modelLists[0].id;
   assert.equal(deleteTarget(reloaded, parked), true);
-  assert.deepEqual(reloaded.targets.map((t) => t.name), ['scratch']);
+  assert.deepEqual(reloaded.modelLists.map((t) => t.name), ['scratch']);
   assert.deepEqual(reloaded.models, [], 'still on the empty list it was on');
-  assert.equal(deleteTarget(reloaded, 'tgt_nope'), false);
+  assert.equal(deleteTarget(reloaded, 'lst_nope'), false);
 
   await fs.rm(dir, { recursive: true, force: true });
 });

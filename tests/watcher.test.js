@@ -124,10 +124,10 @@ test("a request is answered with the file on disk, even with the watcher dead", 
   }
 });
 
-test("switching target list swaps the chain a running proxy serves", async () => {
+test("switching model list swaps the chain a running proxy serves", async () => {
   // The point of having several lists: switching one in the UI has to reach the
   // proxy already running, the same way reordering the chain does. Nothing in the
-  // server knows about target lists — it reads `models`, which is what a switch
+  // server knows about model lists — it reads `models`, which is what a switch
   // rewrites — and this is the test that says so.
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-targets-"));
   const file = path.join(dir, "config.json");

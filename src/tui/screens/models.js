@@ -90,7 +90,7 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
     // Kept open rather than saved blank: two unnamed lists cannot be told apart.
     if (!name) return;
     if (prompt.mode === "rename") {
-      update((draft) => renameTarget(draft, draft.activeTargetId, name));
+      update((draft) => renameTarget(draft, draft.activeListId, name));
       notify(`renamed list to ${name}`);
     } else {
       // Both land on a new list, so both start over from its first row.
@@ -104,7 +104,7 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
 
   const deleteList = () => {
     const gone = list?.name;
-    update((draft) => deleteTarget(draft, draft.activeTargetId));
+    update((draft) => deleteTarget(draft, draft.activeListId));
     setCursor(0);
     resetTests();
     notify(`removed list ${gone}`);

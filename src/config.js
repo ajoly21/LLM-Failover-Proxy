@@ -70,9 +70,26 @@ export const DEFAULTS = {
   models: [],
   // Named chains you switch between. `models` above is the one in use; see
   // `syncTargets` for which of the two wins.
-  targets: [],
-  activeTargetId: null,
+  modelLists: [],
+  activeListId: null,
 };
+
+/**
+ * The names these lists carried in a configuration file up to 1.6.
+ *
+ * A file holding them is read, renamed on the way in, and saved back under the
+ * current names — so an install that predates the rename keeps its lists without
+ * anyone having to touch the file. The id keeps its random half, which is what
+ * makes `activeListId` still point at the same chain afterwards, and no history
+ * is lost either way: the counters are keyed on model ids, never on a list id.
+ *
+ * Only the file changed names. The helpers below are still `*Target*`: they are
+ * internal API, and renaming them would churn every caller for no byte anyone
+ * outside this project ever sees.
+ */
+const LEGACY_KEYS = { lists: "targets", activeId: "activeTargetId" };
+const LEGACY_ID = /^tgt_/;
+const listId = (id) => (typeof id === "string" ? id.replace(LEGACY_ID, "lst_") : id);
 
 /** Name given to the list that existing configurations are migrated into. */
 export const DEFAULT_TARGET_NAME = "default";
@@ -142,7 +159,16 @@ export function loadConfig(file = configPath()) {
   const config = withDefaults(raw, DEFAULTS);
   config.providers = Array.isArray(raw.providers) ? raw.providers.map(normalizeProvider) : [];
   config.models = Array.isArray(raw.models) ? raw.models.map(normalizeModel) : [];
-  config.targets = Array.isArray(raw.targets) ? raw.targets.map(normalizeTarget) : [];
+
+  // The current names, or the ones a file written before the rename carries.
+  const lists = Array.isArray(raw.modelLists) ? raw.modelLists : raw[LEGACY_KEYS.lists];
+  config.modelLists = Array.isArray(lists) ? lists.map(normalizeTarget) : [];
+  config.activeListId = listId(raw.activeListId ?? raw[LEGACY_KEYS.activeId] ?? null);
+  // Read once and dropped, so the next save writes the new names only —
+  // `withDefaults` copies every key it finds, this one included.
+  delete config[LEGACY_KEYS.lists];
+  delete config[LEGACY_KEYS.activeId];
+
   syncTargets(config);
   config.__file = file;
   return config;
@@ -153,7 +179,7 @@ export function saveConfig(config, file = config.__file || configPath()) {
   const { __file, ...clean } = config;
   clean.providers = clean.providers.map(normalizeProvider);
   clean.models = clean.models.map(normalizeModel);
-  clean.targets = clean.targets.map(normalizeTarget);
+  clean.modelLists = clean.modelLists.map(normalizeTarget);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(clean, null, 2)}\n`, { mode: 0o600 });
@@ -193,7 +219,7 @@ function normalizeModel(model) {
 
 function normalizeTarget(target) {
   return {
-    id: target.id || newId("tgt"),
+    id: listId(target.id) || newId("lst"),
     name: targetName(target.name),
     models: Array.isArray(target.models) ? target.models.map(normalizeModel) : [],
   };
@@ -205,38 +231,38 @@ function targetName(name, fallback = DEFAULT_TARGET_NAME) {
 }
 
 /**
- * Reconciles the target lists with the chain in use.
+ * Reconciles the model lists with the chain in use.
  *
  * `config.models` stays the one source of truth for what the proxy serves: the
  * active list is a *mirror* of it, refreshed here on every load and save, and
  * the other lists are the stash holding the chains that are not in use. That way
  * a hand-edited `models` array — and every screen that mutates it — keeps working
- * without knowing target lists exist. `switchTarget` is the only thing allowed to
+ * without knowing model lists exist. `switchTarget` is the only thing allowed to
  * write in the other direction.
  */
 function syncTargets(config) {
-  if (!Array.isArray(config.targets) || !config.targets.length) {
-    config.targets = [{ id: newId("tgt"), name: DEFAULT_TARGET_NAME, models: [] }];
+  if (!Array.isArray(config.modelLists) || !config.modelLists.length) {
+    config.modelLists = [{ id: newId("lst"), name: DEFAULT_TARGET_NAME, models: [] }];
   }
-  const active = config.targets.find((entry) => entry.id === config.activeTargetId) ?? config.targets[0];
-  config.activeTargetId = active.id;
+  const active = config.modelLists.find((entry) => entry.id === config.activeListId) ?? config.modelLists[0];
+  config.activeListId = active.id;
   active.models = config.models.map((entry) => ({ ...entry }));
   return config;
 }
 
 /** The list in use, where it sits in the lineup, and how many there are. */
 export function activeTarget(config) {
-  const targets = Array.isArray(config.targets) ? config.targets : [];
-  const index = Math.max(0, targets.findIndex((entry) => entry.id === config.activeTargetId));
+  const targets = Array.isArray(config.modelLists) ? config.modelLists : [];
+  const index = Math.max(0, targets.findIndex((entry) => entry.id === config.activeListId));
   return { target: targets[index] ?? null, index, total: targets.length };
 }
 
 /** Appends a list holding `models`, and makes it the one in use. */
 function pushTarget(config, name, models) {
   syncTargets(config); // the chain on screen goes back into the list it belongs to
-  const target = { id: newId("tgt"), name: targetName(name, `list ${config.targets.length + 1}`), models };
-  config.targets.push(target);
-  config.activeTargetId = target.id;
+  const target = { id: newId("lst"), name: targetName(name, `list ${config.modelLists.length + 1}`), models };
+  config.modelLists.push(target);
+  config.activeListId = target.id;
   config.models = models.map((entry) => ({ ...entry }));
   return target;
 }
@@ -267,14 +293,14 @@ export function copyTarget(config, name) {
  * and removing the live one hands the chain over to the list that takes its place.
  */
 export function deleteTarget(config, targetId) {
-  if (!Array.isArray(config.targets) || config.targets.length < 2) return false;
-  const index = config.targets.findIndex((entry) => entry.id === targetId);
+  if (!Array.isArray(config.modelLists) || config.modelLists.length < 2) return false;
+  const index = config.modelLists.findIndex((entry) => entry.id === targetId);
   if (index < 0) return false;
-  const wasActive = config.targets[index].id === config.activeTargetId;
-  config.targets.splice(index, 1);
+  const wasActive = config.modelLists[index].id === config.activeListId;
+  config.modelLists.splice(index, 1);
   if (wasActive) {
-    const next = config.targets[Math.min(index, config.targets.length - 1)];
-    config.activeTargetId = next.id;
+    const next = config.modelLists[Math.min(index, config.modelLists.length - 1)];
+    config.activeListId = next.id;
     config.models = next.models.map((entry) => ({ ...entry }));
   }
   return true;
@@ -289,14 +315,14 @@ export function deleteTarget(config, targetId) {
  */
 export function knownModelIds(config) {
   const ids = new Set(config.models.map((entry) => entry.id));
-  for (const target of Array.isArray(config.targets) ? config.targets : []) {
+  for (const target of Array.isArray(config.modelLists) ? config.modelLists : []) {
     for (const entry of target.models) ids.add(entry.id);
   }
   return ids;
 }
 
 export function renameTarget(config, targetId, name) {
-  const target = config.targets.find((entry) => entry.id === targetId);
+  const target = config.modelLists.find((entry) => entry.id === targetId);
   if (!target) return false;
   target.name = targetName(name, target.name);
   return true;
@@ -304,10 +330,10 @@ export function renameTarget(config, targetId, name) {
 
 /** Parks the current chain in its own list, then makes `targetId`'s chain the live one. */
 export function switchTarget(config, targetId) {
-  const next = config.targets.find((entry) => entry.id === targetId);
-  if (!next || next.id === config.activeTargetId) return false;
+  const next = config.modelLists.find((entry) => entry.id === targetId);
+  if (!next || next.id === config.activeListId) return false;
   syncTargets(config);
-  config.activeTargetId = next.id;
+  config.activeListId = next.id;
   config.models = next.models.map((entry) => ({ ...entry }));
   return true;
 }
@@ -316,7 +342,7 @@ export function switchTarget(config, targetId) {
 export function cycleTarget(config, delta) {
   const { index, total } = activeTarget(config);
   if (total < 2) return false;
-  return switchTarget(config, config.targets[(index + delta + total) % total].id);
+  return switchTarget(config, config.modelLists[(index + delta + total) % total].id);
 }
 
 /** An `env:NAME` value is read from the environment at call time, never stored. */

@@ -230,7 +230,7 @@ export function createServer({ configFile, statsFile } = {}) {
   // Counters and cooldowns are restored from disk; `statsFile: null` explicitly
   // unbinds any previous file and keeps everything in memory.
   enableStatsPersistence(statsFile === null ? null : statsFile || statsPathFor(config.__file), {
-    // Every target list, not just the live one: a model parked in another list is
+    // Every model list, not just the live one: a model parked in another list is
     // not obsolete, and its history has to survive being switched away from.
     knownIds: knownModelIds(config),
   });

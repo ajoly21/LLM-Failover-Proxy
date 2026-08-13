@@ -89,12 +89,12 @@ class Keyboard extends EventEmitter {
  * Renders the app against a throwaway config file. Pass `columns`/`rows` to run
  * it on a terminal of that size instead of the shared 100-column renderer.
  */
-async function mount({ providers = [], models = [], targets, activeTargetId, view, columns, rows, update } = {}) {
+async function mount({ providers = [], models = [], modelLists, activeListId, view, columns, rows, update } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-tui-'));
   const file = path.join(dir, 'config.json');
   await fs.writeFile(
     file,
-    JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models, ...(targets ? { targets, activeTargetId } : {}) }),
+    JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models, ...(modelLists ? { modelLists, activeListId } : {}) }),
   );
 
   const finished = [];
@@ -437,8 +437,8 @@ test('a second model list is added, named in place, and reached with the arrows'
 
     assert.match(app.frame(), /list\s+‹ cheap ›\s+2\/2/);
     assert.deepEqual(chain(), [], 'the new list starts empty');
-    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default', 'cheap']);
-    assert.deepEqual(app.config().targets[0].models.map((entry) => entry.model), ['first', 'second'], 'the first chain was parked, not lost');
+    assert.deepEqual(app.config().modelLists.map((entry) => entry.name), ['default', 'cheap']);
+    assert.deepEqual(app.config().modelLists[0].models.map((entry) => entry.model), ['first', 'second'], 'the first chain was parked, not lost');
 
     // ←→ swap which chain the proxy serves, wrapping at both ends.
     await app.press(KEY.left);
@@ -459,7 +459,7 @@ test('a second model list is added, named in place, and reached with the arrows'
     await app.type('-x');
     await app.press(KEY.enter);
     assert.match(app.frame(), /list\s+‹ cheap-x ›/);
-    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default', 'cheap-x']);
+    assert.deepEqual(app.config().modelLists.map((entry) => entry.name), ['default', 'cheap-x']);
   } finally {
     await app.close();
   }
@@ -481,7 +481,7 @@ test('c copies the list in use, and x deletes one', async () => {
 
     assert.match(app.frame(), /list\s+‹ default copy ›\s+2\/2/);
     assert.deepEqual(chain(), ['first', 'second'], 'same models, same order');
-    const copied = app.config().targets[1];
+    const copied = app.config().modelLists[1];
     assert.deepEqual(
       copied.models.map((entry) => entry.id).filter((id) => ['mdl_first', 'mdl_second'].includes(id)),
       [],
@@ -491,17 +491,17 @@ test('c copies the list in use, and x deletes one', async () => {
     // Reordering the copy leaves the list it came from alone.
     await app.press('J');
     assert.deepEqual(chain(), ['second', 'first']);
-    assert.deepEqual(app.config().targets[0].models.map((entry) => entry.model), ['first', 'second'], 'the original is untouched');
+    assert.deepEqual(app.config().modelLists[0].models.map((entry) => entry.model), ['first', 'second'], 'the original is untouched');
 
     // x asks first, and anything but y cancels.
     await app.press('x');
     assert.match(app.frame(), /delete list default copy and its 2 model\(s\)\?/);
     await app.press('n');
-    assert.equal(app.config().targets.length, 2, 'cancelled');
+    assert.equal(app.config().modelLists.length, 2, 'cancelled');
 
     await app.press('x');
     await app.press('y');
-    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default']);
+    assert.deepEqual(app.config().modelLists.map((entry) => entry.name), ['default']);
     assert.deepEqual(chain(), ['first', 'second'], 'the list that took its place is being served');
     assert.match(app.frame(), /list\s+default\s+1\/1/);
   } finally {
@@ -520,7 +520,7 @@ test('the last model list cannot be deleted, and does not offer to be', async ()
     assert.doesNotMatch(app.frame(), /x delete/);
     await app.press('x');
     assert.doesNotMatch(app.frame(), /delete list/, 'nothing to confirm');
-    assert.equal(app.config().targets.length, 1);
+    assert.equal(app.config().modelLists.length, 1);
     assert.deepEqual(app.config().models.map((entry) => entry.model), ['first']);
   } finally {
     await app.close();
@@ -1200,11 +1200,11 @@ test('on a phone-sized terminal, no screen overflows in either direction', async
     ...PHONE,
     providers: [provider('groq')],
     models,
-    targets: [
+    modelLists: [
       { id: 'lst_a', name: 'default', models: [] },
       { id: 'lst_b', name: 'cheap-and-fast', models: [] },
     ],
-    activeTargetId: 'lst_b',
+    activeListId: 'lst_b',
     view: { name: 'models' },
   });
   try {
