@@ -9,8 +9,10 @@ import {
   copyTarget,
   cycleTarget,
   deleteTarget,
+  describeTarget,
   knownModelIds,
   loadConfig,
+  MAX_DESCRIPTION,
   maskSecret,
   moveModel,
   renameTarget,
@@ -177,6 +179,46 @@ test('model lists park a chain and hand another one to the router', async () => 
   renameTarget(again, second.id, '   ');
   assert.equal(again.modelLists[1].name, 'cheap', 'a blank name is refused, the old one stands');
   assert.equal(renameTarget(again, 'lst_nope', 'x'), false);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('a list says what it is for, and a copy is tried for the same job', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-describe-'));
+  const file = path.join(dir, 'config.json');
+  const entry = (model) => ({ id: `mdl_${model}`, providerId: 'prov_1', model, alias: model, kind: 'chat', enabled: true, params: {} });
+  await fs.writeFile(file, JSON.stringify({ models: [entry('aa')] }));
+
+  const config = loadConfig(file);
+  const live = () => activeTarget(config).target;
+  assert.equal(live().description, '', 'nothing is invented for a list nobody has explained');
+
+  // Written, then read back off disk: the note is part of the list, not of a screen.
+  assert.equal(describeTarget(config, config.activeListId, '  everyday   work\n— free tiers first  '), true);
+  assert.equal(live().description, 'everyday work — free tiers first', 'newlines and runs of spaces are flattened to the one line it is shown on');
+  saveConfig(config, file);
+  assert.equal(activeTarget(loadConfig(file)).target.description, 'everyday work — free tiers first');
+
+  // A variant is tried for the job the original does, so the note comes with it.
+  const copy = copyTarget(config, 'variant');
+  assert.equal(copy.description, 'everyday work — free tiers first');
+  // And each list owns its own: correcting the copy leaves the original alone.
+  describeTarget(config, copy.id, 'same chain, hedging turned off');
+  assert.equal(config.modelLists[0].description, 'everyday work — free tiers first');
+
+  // Blank clears it: a note that stopped being true is worse than no note.
+  assert.equal(describeTarget(config, copy.id, '   '), true);
+  assert.equal(copy.description, '');
+  // Renaming is not describing, and neither touches the other.
+  describeTarget(config, copy.id, 'for the day nothing free answers');
+  renameTarget(config, copy.id, 'paid-fallback');
+  assert.equal(copy.description, 'for the day nothing free answers');
+  assert.equal(copy.name, 'paid-fallback');
+
+  assert.equal(describeTarget(config, 'lst_nope', 'x'), false);
+  // One line, so it is stored as one: anything past that would never be shown.
+  describeTarget(config, copy.id, 'x'.repeat(MAX_DESCRIPTION + 50));
+  assert.equal(copy.description.length, MAX_DESCRIPTION);
 
   await fs.rm(dir, { recursive: true, force: true });
 });

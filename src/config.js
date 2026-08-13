@@ -221,6 +221,7 @@ function normalizeTarget(target) {
   return {
     id: listId(target.id) || newId("lst"),
     name: targetName(target.name),
+    description: targetDescription(target.description),
     models: Array.isArray(target.models) ? target.models.map(normalizeModel) : [],
   };
 }
@@ -228,6 +229,24 @@ function normalizeTarget(target) {
 /** A list with no name cannot be told from another, so it is never stored empty. */
 function targetName(name, fallback = DEFAULT_TARGET_NAME) {
   return String(name ?? "").trim() || fallback;
+}
+
+/** One line has to be enough: past this, nothing on screen would show it whole. */
+export const MAX_DESCRIPTION = 160;
+
+/**
+ * What this list is for, in the user's own words — the answer to "which one do I
+ * switch to?", which a name alone rarely gives.
+ *
+ * Empty is a legitimate value, unlike a name: a list nobody has explained yet
+ * says nothing rather than making something up. Newlines and runs of spaces are
+ * flattened because every place this is shown is a single line.
+ */
+function targetDescription(description) {
+  return String(description ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_DESCRIPTION);
 }
 
 /**
@@ -242,7 +261,7 @@ function targetName(name, fallback = DEFAULT_TARGET_NAME) {
  */
 function syncTargets(config) {
   if (!Array.isArray(config.modelLists) || !config.modelLists.length) {
-    config.modelLists = [{ id: newId("lst"), name: DEFAULT_TARGET_NAME, models: [] }];
+    config.modelLists = [{ id: newId("lst"), name: DEFAULT_TARGET_NAME, description: "", models: [] }];
   }
   const active = config.modelLists.find((entry) => entry.id === config.activeListId) ?? config.modelLists[0];
   config.activeListId = active.id;
@@ -258,9 +277,14 @@ export function activeTarget(config) {
 }
 
 /** Appends a list holding `models`, and makes it the one in use. */
-function pushTarget(config, name, models) {
+function pushTarget(config, name, models, description = "") {
   syncTargets(config); // the chain on screen goes back into the list it belongs to
-  const target = { id: newId("lst"), name: targetName(name, `list ${config.modelLists.length + 1}`), models };
+  const target = {
+    id: newId("lst"),
+    name: targetName(name, `list ${config.modelLists.length + 1}`),
+    description: targetDescription(description),
+    models,
+  };
   config.modelLists.push(target);
   config.activeListId = target.id;
   config.models = models.map((entry) => ({ ...entry }));
@@ -278,13 +302,16 @@ export function addTarget(config, name) {
  *
  * The copies are new entries with ids of their own, so each list keeps its own
  * counters: a variant starts from zero rather than inheriting traffic it never
- * served.
+ * served. The note comes along, since a variant is tried for the same job as the
+ * list it came from — and editing one line beats retyping it from memory.
  */
 export function copyTarget(config, name) {
+  const { target: from } = activeTarget(config);
   return pushTarget(
     config,
     name,
     config.models.map((entry) => ({ ...entry, id: newId("mdl") })),
+    from?.description,
   );
 }
 
@@ -325,6 +352,17 @@ export function renameTarget(config, targetId, name) {
   const target = config.modelLists.find((entry) => entry.id === targetId);
   if (!target) return false;
   target.name = targetName(name, target.name);
+  return true;
+}
+
+/**
+ * Sets what a list is for. Blank is accepted and clears it: a note that no longer
+ * describes the chain is worse than none, so taking it back has to be possible.
+ */
+export function describeTarget(config, targetId, description) {
+  const target = config.modelLists.find((entry) => entry.id === targetId);
+  if (!target) return false;
+  target.description = targetDescription(description);
   return true;
 }
 
