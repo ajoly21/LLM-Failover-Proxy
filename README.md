@@ -225,6 +225,8 @@ Both percentages ignore the dropped races, so neither punishes a model for being
 
 The rows are always in **your** priority order, the same as the _Target lists_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
 
+**The counters shown are those of the target list in use, and only those.** The models of your other lists keep their own history on disk — switching away from a list does not lose it, and switching back shows it again — but they are never mixed into the list you are reading. If the answering proxy reports models this list does not have, they are counted on a line of their own rather than added to the table: `2 more model(s) served, in another list or another config`.
+
 ### The terminal UI
 
 ```
@@ -234,7 +236,7 @@ The rows are always in **your** priority order, the same as the _Target lists_ s
 │  background running (pid 24188)                                          │
 │                                                                          │
 │ ▸ 1. Providers         endpoints, API keys, protocol                     │
-│   2. Target lists      failover chain, live latency tests                │
+│   2. Target lists      failover chains, switch them, live tests          │
 │   3. Settings          port, timeouts, failover policy                   │
 │   4. Status & stats    persisted counters and cooldowns                  │
 │   5. Setup wizard      add the default chain, paste keys                 │
@@ -251,6 +253,23 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 **Providers**, ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
 
 **Target lists**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
+
+**One chain is rarely enough.** A target list is a named chain, and you can keep several: a cheap one for everyday work, a long one for the day the cheap providers are down, one holding nothing but local models. The line above the table says which one is live, and the keys to the rest are on it:
+
+```
+  list  ‹ cheap-and-fast ›  2/3
+  ←→ switch list · n new · N copy · r rename · x delete
+```
+
+`←→` switches the list being served, `n` starts a new empty one, `N` copies the one you are on, `r` renames it, `x` removes it — the name is typed straight into that line, no form, no second screen. The list you switch to becomes the chain the proxy answers with immediately: a background instance picks it up through its config watcher, with no restart, so switching lists **is** how you compare them under real traffic. The other lists sit in the config file untouched until you come back to them.
+
+| Key  | Does                                                                                                                       |
+| ---- | -------------------------------------------------------------------------------------------------------------------------- |
+| `←→` | serve the previous / next list, wrapping at both ends                                                                      |
+| `n`  | a new **empty** list, to fill with `a`                                                                                     |
+| `N`  | a **copy** of this list — same models, same order — for trying a variant. The copies are new entries, so the copy's counters start at zero rather than inheriting traffic it never served |
+| `r`  | rename this list                                                                                                           |
+| `x`  | delete this list, after a `y/n`. Never offered for the last one: something has to be served. Deleting the live list hands the chain to the list that takes its place |
 
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
@@ -278,7 +297,7 @@ Two files, side by side, **configuration** and **secrets** are deliberately kept
 
 | File                                    | Contents                                                                                                                                | Commit it?               |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `config.json`                           | providers, models, priority order, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                                        | yes, if you want         |
+| `config.json`                           | providers, models, priority order, target lists, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                          | yes, if you want         |
 | `.env`                                  | the actual API keys, one per line, `0600`                                                                                               | **never**                |
 | `.env.example`                          | the variables the default chain expects, with links to get each key                                                                     | shipped with the package |
 | `<config>.stats.json`                   | counters and cooldowns, so they survive restarts                                                                                        | no                       |
@@ -289,6 +308,25 @@ The configuration file is looked up in this order: `--config <path>`, `$LLM_PROX
 The `.env` is read from the current directory **and** from the folder holding the configuration file, so both a project-local and a machine-wide setup work. A real environment variable always wins over the file, handy in Docker or CI, where you can skip the `.env` entirely and just pass `NVIDIA_API_KEY=…`.
 
 Every screen that takes a key writes it to the `.env` and stores only an `env:NAME` reference, so there is nothing to migrate and no command to run. A key left inside `config.json` by an older version keeps working; `status` points it out, and retyping it in the UI is what moves it.
+
+### Target lists in the file
+
+`models` is always the chain being served — the array the proxy reads, and the only one it reads. `targets` holds the named lists beside it, and `activeTargetId` says which of them the live chain belongs to:
+
+```jsonc
+{
+  "models": [ /* the chain in use, in priority order */ ],
+  "activeTargetId": "tgt_9f3c1a20",
+  "targets": [
+    { "id": "tgt_1b7e04d5", "name": "default", "models": [ /* parked */ ] },
+    { "id": "tgt_9f3c1a20", "name": "cheap-and-fast", "models": [ /* mirrors `models` above */ ] }
+  ]
+}
+```
+
+So the active entry in `targets` is a mirror, refreshed on every save, and `models` wins whenever the two disagree. Editing `models` by hand is therefore always safe and always takes effect; editing the *active* list instead would be overwritten. A file written before target lists existed gets one called `default` on first load, holding the chain it already had.
+
+Counters are kept per model entry, and pruned on startup against **every** list rather than just the live one — so a chain you switched away from still has its history when you come back to it.
 
 ### Changing the default chain
 

@@ -80,10 +80,13 @@ class Keyboard extends EventEmitter {
  * Renders the app against a throwaway config file. Pass `columns`/`rows` to run
  * it on a terminal of that size instead of the shared 100-column renderer.
  */
-async function mount({ providers = [], models = [], view, columns, rows, update } = {}) {
+async function mount({ providers = [], models = [], targets, activeTargetId, view, columns, rows, update } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-tui-'));
   const file = path.join(dir, 'config.json');
-  await fs.writeFile(file, JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models }));
+  await fs.writeFile(
+    file,
+    JSON.stringify({ server: { host: '127.0.0.1', port: 47821 }, providers, models, ...(targets ? { targets, activeTargetId } : {}) }),
+  );
 
   const finished = [];
   // No test ever reaches the registry: the default checker is replaced by one
@@ -397,6 +400,133 @@ test('models screen reorders the chain with shift+arrows and J/K', async () => {
     await app.press(KEY.up);
     await app.press(KEY.shiftUp, 2); // at the boundary: no move, no crash
     assert.deepEqual(app.config().models.map((entry) => entry.model), ['first', 'second', 'third']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a second target list is added, named in place, and reached with the arrows', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq'), model('second', 'groq')],
+    view: { name: 'models' },
+  });
+  const chain = () => app.config().models.map((entry) => entry.model);
+  try {
+    assert.match(app.frame(), /list\s+default\s+1\/1/, 'the list in use is named on screen');
+    assert.match(app.frame(), /←→ switch list · n new · N copy · r rename/, 'and how to get another one');
+
+    // n opens the field, and the name is typed where the name is shown.
+    await app.press('n');
+    await app.type('cheap');
+    assert.match(app.frame(), /new: cheap/, 'typed in place, not on another screen');
+    await app.press(KEY.enter);
+
+    assert.match(app.frame(), /list\s+‹ cheap ›\s+2\/2/);
+    assert.deepEqual(chain(), [], 'the new list starts empty');
+    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default', 'cheap']);
+    assert.deepEqual(app.config().targets[0].models.map((entry) => entry.model), ['first', 'second'], 'the first chain was parked, not lost');
+
+    // ←→ swap which chain the proxy serves, wrapping at both ends.
+    await app.press(KEY.left);
+    assert.match(app.frame(), /list\s+‹ default ›\s+1\/2/);
+    assert.deepEqual(chain(), ['first', 'second'], 'the parked chain is live again');
+
+    await app.press(KEY.left);
+    assert.match(app.frame(), /2\/2/, 'wraps round to the last list');
+    assert.deepEqual(chain(), []);
+
+    // r renames the list in use, and esc leaves it alone.
+    await app.press('r');
+    await app.press(KEY.backspace, 5);
+    await app.press(KEY.escape);
+    assert.match(app.frame(), /list\s+‹ cheap ›/, 'cancelled, so the name stands');
+
+    await app.press('r');
+    await app.type('-x');
+    await app.press(KEY.enter);
+    assert.match(app.frame(), /list\s+‹ cheap-x ›/);
+    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default', 'cheap-x']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('N copies the list in use, and x deletes one', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq'), model('second', 'groq')],
+    view: { name: 'models' },
+  });
+  const chain = () => app.config().models.map((entry) => entry.model);
+  try {
+    // The copy is offered under a name of its own, prefilled so enter is enough.
+    await app.press('N');
+    assert.match(app.frame(), /copy: default copy/, 'prefilled with a name derived from the original');
+    await app.press(KEY.enter);
+
+    assert.match(app.frame(), /list\s+‹ default copy ›\s+2\/2/);
+    assert.deepEqual(chain(), ['first', 'second'], 'same models, same order');
+    const copied = app.config().targets[1];
+    assert.deepEqual(
+      copied.models.map((entry) => entry.id).filter((id) => ['mdl_first', 'mdl_second'].includes(id)),
+      [],
+      'and entries of its own, so the counters of the original stay the original list history',
+    );
+
+    // Reordering the copy leaves the list it came from alone.
+    await app.press('J');
+    assert.deepEqual(chain(), ['second', 'first']);
+    assert.deepEqual(app.config().targets[0].models.map((entry) => entry.model), ['first', 'second'], 'the original is untouched');
+
+    // x asks first, and anything but y cancels.
+    await app.press('x');
+    assert.match(app.frame(), /delete list default copy and its 2 model\(s\)\?/);
+    await app.press('n');
+    assert.equal(app.config().targets.length, 2, 'cancelled');
+
+    await app.press('x');
+    await app.press('y');
+    assert.deepEqual(app.config().targets.map((entry) => entry.name), ['default']);
+    assert.deepEqual(chain(), ['first', 'second'], 'the list that took its place is being served');
+    assert.match(app.frame(), /list\s+default\s+1\/1/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the last target list cannot be deleted, and does not offer to be', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq')],
+    view: { name: 'models' },
+  });
+  try {
+    // Something has to be served, so the key is neither offered nor accepted.
+    assert.doesNotMatch(app.frame(), /x delete/);
+    await app.press('x');
+    assert.doesNotMatch(app.frame(), /delete list/, 'nothing to confirm');
+    assert.equal(app.config().targets.length, 1);
+    assert.deepEqual(app.config().models.map((entry) => entry.model), ['first']);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a single target list has nowhere to switch to, and says nothing about it', async () => {
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('first', 'groq')],
+    view: { name: 'models' },
+  });
+  try {
+    // No `‹ ›` around a name that leads nowhere, and the arrows are inert rather
+    // than wrapping the one list onto itself.
+    assert.match(app.frame(), /list\s+default\s+1\/1/);
+    assert.doesNotMatch(app.frame(), /‹ default ›/);
+    await app.press(KEY.right);
+    assert.match(app.frame(), /list\s+default\s+1\/1/);
+    assert.deepEqual(app.config().models.map((entry) => entry.model), ['first']);
   } finally {
     await app.close();
   }
@@ -822,8 +952,12 @@ test('the counters table follows this configuration, not the order the proxy sen
       .map((line) => line.match(/\s(\d+)\s+groq\/(\S+)/))
       .filter(Boolean)
       .map(([, priority, target]) => `${priority} ${target}`);
-    assert.deepEqual(rows.slice(0, 3), ['1 first', '2 second', '3 third'], "the configuration's own priority order");
-    assert.match(app.frame(), /groq\/retired/, 'and what the proxy has but this configuration does not is kept, at the end');
+    assert.deepEqual(rows, ['1 first', '2 second', '3 third'], "the configuration's own priority order, and nothing else");
+    // These are the stats of the list in use: an entry the proxy reports and this
+    // list does not have belongs to another list, or another file. Left out of the
+    // table, but said out loud rather than dropped in silence.
+    assert.doesNotMatch(app.frame(), /groq\/retired/, 'a model outside this list is not in the table');
+    assert.match(app.frame(), /1 more model\(s\) served, in another list or another config/);
   } finally {
     await app.close();
   }
@@ -916,6 +1050,28 @@ test('on a phone-sized terminal, no screen overflows in either direction', async
     } finally {
       await app.close();
     }
+  }
+
+  // The worst case for this screen: several lists, so `x delete list` is offered
+  // as well and every list key has to fit in hints that already wrap four lines.
+  const crowded = await mount({
+    ...PHONE,
+    providers: [provider('groq')],
+    models,
+    targets: [
+      { id: 'tgt_a', name: 'default', models: [] },
+      { id: 'tgt_b', name: 'cheap-and-fast', models: [] },
+    ],
+    activeTargetId: 'tgt_b',
+    view: { name: 'models' },
+  });
+  try {
+    const { width, height } = shape(crowded);
+    assert.ok(width <= PHONE.columns, `the target list screen is ${width} columns wide, the terminal has ${PHONE.columns}`);
+    assert.ok(height <= PHONE.rows, `the target list screen needs ${height} rows, the terminal has ${PHONE.rows}`);
+    assert.match(crowded.frame(), /x delete list/, 'and the key to remove one is reachable there too');
+  } finally {
+    await crowded.close();
   }
 });
 
