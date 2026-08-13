@@ -192,6 +192,9 @@ llmfp                           exactly the same, and so for every command below
 llm-failover-proxy setup        run the setup wizard again
 llm-failover-proxy status       what is configured, what is running, live counters
 llm-failover-proxy stats        just the counters table, then back to the shell
+llm-failover-proxy lists        the model lists, and which one is being served
+llm-failover-proxy describe     what each list is for, and how to serve it
+llm-failover-proxy use <name>   serve another model list, by name or by its number
 llm-failover-proxy logs         end of the background log
 llm-failover-proxy stop         stop the background proxy
 llm-failover-proxy restart      restart it
@@ -237,7 +240,9 @@ Persisted counters (nothing running, read from disk)
 
 Both percentages ignore the dropped races, so neither punishes a model for being fast enough to be raced against. `USE` at `0%` means this model has never served an answer: either it sits far enough down the chain never to be reached, or it fails when it is — `UPTIME` tells you which.
 
-The rows are always in **your** priority order, the same as the _Models & priority_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
+The rows are always in **your** priority order, the same as the _Models lists_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model.
+
+**The counters shown are those of the model list in use, and only those.** The models of your other lists keep their own history on disk — switching away from a list does not lose it, and switching back shows it again — but they are never mixed into the list you are reading. If the answering proxy reports models this list does not have, they are counted on a line of their own rather than added to the table: `2 more model(s) served, in another list or another config`.
 
 ### The terminal UI
 
@@ -247,12 +252,12 @@ The rows are always in **your** priority order, the same as the _Models & priori
 │  listening on 127.0.0.1:47821   providers 3   models 10                  │
 │  background running (pid 24188)                                          │
 │                                                                          │
-│ ▸ 1. Providers          endpoints, API keys, protocol                    │
-│   2. Models & priority  failover chain, live latency tests               │
-│   3. Settings           port, timeouts, failover policy                  │
-│   4. Status & stats     persisted counters and cooldowns                 │
-│   5. Setup wizard       add the default chain, paste keys                │
-│   6. Start the server   closes this screen                               │
+│ ▸ 1. Providers         endpoints, API keys, protocol                     │
+│   2. Models lists      failover chains, switch them, live tests          │
+│   3. Settings          port, timeouts, failover policy                   │
+│   4. Status & stats    persisted counters and cooldowns                  │
+│   5. Setup wizard      add the default chain, paste keys                 │
+│   6. Start the server  closes this screen                                │
 │   7. Quit                                                                │
 ╰──────────────────────────────────────────────────────────────────────────╯
  ↑↓ move · enter open · 1-7 jump · q quit
@@ -264,7 +269,7 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 
 **Providers**, ready-made entries for OpenAI, Anthropic, OpenRouter, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, xAI, Gemini, Azure, Ollama and LM Studio, or any custom endpoint. Keys are masked everywhere and stored in the `.env`; the table shows whether each one resolves (`env:GROQ_API_KEY` in green) or is missing (red).
 
-**Models & priority**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
+**Models lists**, the chain, in failover order. To move a model, press `m` to pick it up, `↑↓` to carry it, `enter` to drop it. No modifier is involved, because phone keyboards and several SSH clients cannot send one — `⇧↑`/`⇧↓` and `J`/`K` still work where they do.
 
 **Adding a model asks the provider what it serves.** Pick the provider and the model id field fills itself from that provider's own `/models` list — so you type what you remember rather than what you can quote. The match is on any part of the name, not its start: with nvidia selected, `glm` offers `z-ai/glm-5.2`, and several words narrow it further (`glm free`). `↑↓` walks the list — scrolling through the matches that do not fit, the count below says where you are — `enter` takes one, `tab` moves to the next field, and models already in your chain are marked as such. A provider that cannot be reached — no key yet, or offline — says so and leaves the field a plain text box, so nothing here can stop you typing an id by hand.
 
@@ -274,6 +279,90 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
           ▸ z-ai/glm-4.7-air   already in the chain
             z-ai/glm-5.2-free
 ```
+
+**One chain is rarely enough.** A model list is a named chain, and you can keep several: a cheap one for everyday work, a long one for the day the cheap providers are down, one holding nothing but local models. The line above the table says which one is live, and the keys to the rest are on it:
+
+```
+  list  ‹ cheap-and-fast ›  2/3
+  everyday work — free tiers first, nothing metered in the chain
+  ←→ switch list · n new list · c copy list · r rename list · w when to use · x delete list
+```
+
+Every key that acts on a list is written **there**, under the name of the list it acts on — the hints at the foot of the screen are the chain's own keys, and the two are never mixed. `←→` switches the list being served, `n` starts a new empty one, `c` copies the one you are on, `r` renames it, `x` removes it — the name is typed straight into that line, no form, no second screen. The list you switch to becomes the chain the proxy answers with immediately: a background instance picks it up through its config watcher, with no restart, so switching lists **is** how you compare them under real traffic. The other lists sit in the config file untouched until you come back to them.
+
+| Key  | Does                                                                                                                       |
+| ---- | -------------------------------------------------------------------------------------------------------------------------- |
+| `←→` | serve the previous / next list, wrapping at both ends                                                                      |
+| `n`  | a new **empty** list, to fill with `a`                                                                                     |
+| `c`  | a **copy** of this list — same models, same order — for trying a variant. The copies are new entries, so the copy's counters start at zero rather than inheriting traffic it never served |
+| `r`  | rename this list                                                                                                           |
+| `w`  | **when to use** this list: one line saying what it is for, shown under its name and everywhere a list is picked. Blank clears it |
+| `x`  | delete this list, after a `y/n`. Never offered for the last one: something has to be served. Deleting the live list hands the chain to the list that takes its place |
+
+`c` rather than a shifted `n`: `N` reads as a second way to say "new list", and got pressed for one.
+
+### Say when each list should be the one serving
+
+A name is not a reason. Three months after building `fast-2`, `cheap-and-fast` and `local`, the question you have in front of the switcher is not *which lists exist* — it is **which one do I want right now**, and no name answers that on its own.
+
+So a list carries one line of your own words, the same way an MCP server carries a description telling a model when to call it: `w`, type it, `enter`. It is shown under the list name while you switch, in `llmfp lists`, and echoed back by `llmfp use` so a name matched on a fragment confirms itself.
+
+```
+  1  free-only       11  11  -    everyday work — free tiers first, nothing metered
+  2  paid-fallback    4   4  yes  the day every free tier is out of quota, and it has to answer
+  3  local-only       2   2  -    on the plane, or when nothing may leave the machine
+```
+
+Write it for the version of you who has forgotten why the list exists. A copy inherits the note, because a variant is tried for the same job as the list it came from — and a note that stopped being true is worse than none, so blank clears it.
+
+### `llmfp describe`: the report something else chooses by
+
+The notes are worth writing because something other than you reads them. `llmfp describe` prints every list purpose-first, with the command that serves it underneath — which is all an agent, a deploy script or a colleague needs to pick the right chain without opening the config:
+
+```
+$ llmfp describe
+  Model lists — what each one is for. Pick by the note, then run the command under it.
+
+  free-only (1/3 · 11 model(s), 11 enabled)
+    everyday work — free tiers first, nothing metered
+    llmfp use free-only
+
+  paid-fallback (2/3 · 4 model(s), 4 enabled)   serving now
+    the day every free tier is out of quota, and it has to answer
+
+  on the plane (3/3 · 2 model(s), 2 enabled)
+    no note yet — llmfp describe "on the plane" "when this list should serve"
+    llmfp use "on the plane"
+```
+
+The same command writes them, so whatever built a chain can explain it in the same breath:
+
+```bash
+llmfp describe                              # every list, its note, and how to serve it
+llmfp describe free-only                    # just that note, on its own line, ready to pipe
+llmfp describe free-only "everyday work"    # says when that list should be the one serving
+llmfp describe free-only ""                 # takes the note back
+llmfp describe --json                        # the same, with a ready-to-run `use` per list
+```
+
+Reading and writing are told apart by how many words arrive, not by the note being blank — which is what leaves `""` free to mean *clear it*. A name that would not survive a shell is quoted in every command the report prints, so the line can be pasted as it stands. An unknown name exits non-zero, the same as `use`.
+
+**None of this needs the UI**, for a script or a shell you want back: `llmfp lists` prints the lists with their notes and marks the one being served, `llmfp use <name|index>` switches to another — by its number, its name, or enough of the name to be unambiguous.
+
+```
+$ llmfp lists
+Model lists — the active one is the chain the proxy serves
+  #  NAME            MODELS  ON  ACTIVE  WHEN TO USE
+  1  default         11      11  -       everything, in failover order
+  2  cheap-and-fast  4       3   yes     everyday work — free tiers first, nothing metered
+
+$ llmfp use default
+  now serving default (1/2)   11 model(s), 11 enabled
+  everything, in failover order
+  the background proxy (pid 24188) reads the file on every request, so this is already live
+```
+
+`use` exits non-zero when the name matches no list, or two, so a deploy script can branch on it; `lists --json` and `use --json` give the same facts as machine-readable output, the note included, which is what a shell picker needs to offer more than bare names.
 
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
@@ -301,7 +390,7 @@ Two files, side by side, **configuration** and **secrets** are deliberately kept
 
 | File                                    | Contents                                                                                                                                | Commit it?               |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `config.json`                           | providers, models, priority order, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                                        | yes, if you want         |
+| `config.json`                           | providers, models, priority order, model lists and what each is for, timeouts. Keys appear only as `env:NVIDIA_API_KEY` references                          | yes, if you want         |
 | `.env`                                  | the actual API keys, one per line, `0600`                                                                                               | **never**                |
 | `.env.example`                          | the variables the default chain expects, with links to get each key                                                                     | shipped with the package |
 | `<config>.stats.json`                   | counters and cooldowns, so they survive restarts                                                                                        | no                       |
@@ -312,6 +401,37 @@ The configuration file is looked up in this order: `--config <path>`, `$LLM_PROX
 The `.env` is read from the current directory **and** from the folder holding the configuration file, so both a project-local and a machine-wide setup work. A real environment variable always wins over the file, handy in Docker or CI, where you can skip the `.env` entirely and just pass `NVIDIA_API_KEY=…`.
 
 Every screen that takes a key writes it to the `.env` and stores only an `env:NAME` reference, so there is nothing to migrate and no command to run. A key left inside `config.json` by an older version keeps working; `status` points it out, and retyping it in the UI is what moves it.
+
+### Model lists in the file
+
+`models` is always the chain being served — the array the proxy reads, and the only one it reads. `modelLists` holds the named lists beside it, and `activeListId` says which of them the live chain belongs to:
+
+```jsonc
+{
+  "models": [ /* the chain in use, in priority order */ ],
+  "activeListId": "lst_9f3c1a20",
+  "modelLists": [
+    {
+      "id": "lst_1b7e04d5",
+      "name": "default",
+      "description": "everything, in failover order", // what `w` writes: when to use this one
+      "models": [ /* parked */ ]
+    },
+    {
+      "id": "lst_9f3c1a20",
+      "name": "cheap-and-fast",
+      "description": "everyday work — free tiers first, nothing metered",
+      "models": [ /* mirrors `models` above */ ]
+    }
+  ]
+}
+```
+
+So the active entry in `modelLists` is a mirror, refreshed on every save, and `models` wins whenever the two disagree. Editing `models` by hand is therefore always safe and always takes effect; editing the *active* list instead would be overwritten. A file written before model lists existed gets one called `default` on first load, holding the chain it already had.
+
+**A file from 1.6 or earlier calls these `targets`, `activeTargetId` and `tgt_…`.** It is read as it is, renamed on the way in, and written back under the names above the next time anything is saved — nothing to run, and nothing to lose: the id keeps its random half, so the list that was being served still is, and the counters were never keyed on a list id in the first place.
+
+Counters are kept per model entry, and pruned on startup against **every** list rather than just the live one — so a chain you switched away from still has its history when you come back to it.
 
 ### Changing the default chain
 
@@ -420,7 +540,7 @@ A model set aside is still tried as a **last resort** when nothing else is avail
 
 | Key               | Default | Expires when                                                                                                                               |
 | ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `probe.timeoutMs` | 15000   | a test **you** started (`t` on Models & priority, `t` on Providers) has not finished. One budget for the whole probe, first token included |
+| `probe.timeoutMs` | 15000   | a test **you** started (`t` on Models lists, `t` on Providers) has not finished. One budget for the whole probe, first token included |
 
 Deliberately separate from the deadlines above: letting a slow model finish a benchmark should not make every real request wait longer.
 
