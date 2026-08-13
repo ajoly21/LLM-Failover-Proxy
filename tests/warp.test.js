@@ -9,7 +9,6 @@ import zlib from 'node:zlib';
 
 import { extractFromTarGz, untar } from '../src/warp/archive.js';
 import { digestFor, parseProfile, writeTunnelConfig } from '../src/warp/binaries.js';
-import { parseTrace } from '../src/warp/egress.js';
 import { detect, downloads, supported, UnsupportedPlatformError, WGCF_VERSION, WIREPROXY_VERSION } from '../src/warp/platform.js';
 import { warpPaths } from '../src/warp/paths.js';
 import { isLocalTarget, proxiedFetch, ProxyUnreachableError, resetTunnels } from '../src/outbound.js';
@@ -195,17 +194,6 @@ test('the tunnel configuration carries the chosen ports and no IPv6 route', asyn
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
-});
-
-test('a trace answer is read for the address and for whether WARP really carried it', () => {
-  const trace = parseTrace(['fl=123abc', 'ip=104.28.211.192', 'warp=on', 'colo=CDG', 'loc=FR'].join('\n'));
-  assert.deepEqual(trace, { ip: '104.28.211.192', warp: true, colo: 'CDG', loc: 'FR' });
-
-  // WARP+ is still WARP.
-  assert.equal(parseTrace('ip=1.2.3.4\nwarp=plus').warp, true);
-  // The distinction that matters: the tunnel is up but the traffic went around it.
-  assert.equal(parseTrace('ip=1.2.3.4\nwarp=off').warp, false);
-  assert.equal(parseTrace('nothing useful'), null, 'an answer with no address is no answer');
 });
 
 /* ------------------------------------------------------------------ *
@@ -472,7 +460,7 @@ test('an https target is tunnelled with CONNECT, and a refusal is not mistaken f
  * What the stats say about where a request went                        *
  * ------------------------------------------------------------------ */
 
-test('a served request records the path it took, and asks nobody when WARP is off', async () => {
+test('a served request records the path it took, and asks nobody about it', async () => {
   const mock = await startMock('ok', { name: 'provider' });
   const proxy = await startProxy(assemble([backend(mock, { model: 'm', alias: 'a' })]));
   try {
@@ -481,9 +469,9 @@ test('a served request records the path it took, and asks nobody when WARP is of
 
     assert.equal(stats.warp.enabled, false, 'the default, and what an upgraded install keeps');
     assert.equal(stats.recent[0].via, 'direct', 'a row always says which way it went');
-    // No lookup is made while WARP is off: there is nothing to verify, and this
-    // tool makes no outbound request of its own that a user did not ask for.
-    assert.equal(stats.recent[0].exitIp, null);
+    // The path is known from the outbound decision itself, so nothing is asked
+    // of the network: this tool makes no outbound request a user did not ask for.
+    assert.equal(stats.recent[0].exitIp, undefined, 'no address is recorded, reliably or otherwise');
 
     flushStats();
     const onDisk = JSON.parse(await fs.readFile(statsPathFor(proxy.file), 'utf8'));
@@ -503,7 +491,7 @@ test('a stats file written before WARP existed still loads, and its rows say so'
     flushStats();
     await first.stop();
 
-    // Rewritten as an older version left it: recent rows with no `via`, no `exitIp`.
+    // Rewritten as an older version left it: recent rows with no `via` at all.
     const file = statsPathFor(first.file);
     const saved = JSON.parse(await fs.readFile(file, 'utf8'));
     saved.recent = [{ id: modelId, at: Date.now() - 5000, ttftMs: 431 }];
@@ -516,7 +504,6 @@ test('a stats file written before WARP existed still loads, and its rows say so'
     // Unknown, which is not the same as "went out directly" — the row predates
     // anything having been recorded about the path.
     assert.equal(stats.recent[0].via, null);
-    assert.equal(stats.recent[0].exitIp, null);
     await restarted.close();
   } finally {
     await mock.close();

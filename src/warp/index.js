@@ -1,7 +1,6 @@
 import { processAlive } from "../daemon.js";
 import { log } from "../logger.js";
 import { proxiedFetch, resetTunnels } from "../outbound.js";
-import { cachedEgress, egressNow, refreshEgress } from "./egress.js";
 import { supported } from "./platform.js";
 import { warpDir, warpPaths } from "./paths.js";
 import { listening, proxyUrl, readState, rotateTunnel, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
@@ -9,7 +8,6 @@ import { listening, proxyUrl, readState, rotateTunnel, startTunnel, stopTunnel, 
 export { UnsupportedPlatformError, WGCF_VERSION, WIREPROXY_VERSION, supported } from "./platform.js";
 export { warpDir, warpPaths } from "./paths.js";
 export { proxyUrl, readState, rotateTunnel, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
-export { cachedEgress, probeEgress, refreshEgress } from "./egress.js";
 
 /**
  * Whether the providers are reached through Cloudflare WARP, and how.
@@ -77,43 +75,6 @@ export function fetchVia(path) {
   return path.proxyUrl ? proxiedFetch(path.proxyUrl) : fetch;
 }
 
-/**
- * The exit IP to stamp on a served request: whatever is known now, never a wait.
- *
- * Measured only once WARP is enabled, and then for both paths. Enabling it is the
- * consent; an install that leaves it off makes exactly as few outbound requests
- * of its own as it did before this feature existed, and `llmfp warp status` is
- * there for anyone who wants the address on demand.
- *
- * Both paths, not just the tunnel, because of one case: WARP on, tunnel down,
- * request allowed out directly. That row is the one where the address matters
- * most — it is the leak — and answering it with a dash would be a poor report.
- *
- * `via` is stamped either way, so a row says which path it took even when no
- * measurement exists.
- */
-export function exitFor(config, path) {
-  if (!warpEnabled(config) || !config.warp?.checkExitIp) return { ip: null, via: path.via };
-  const known = egressNow(config.__file, { proxyUrl: path.proxyUrl, via: path.via });
-  return { ip: known?.ip ?? null, via: path.via };
-}
-
-/**
- * Measures the exit IP and waits for the answer.
- *
- * The fire-and-forget version above is right while a request is being served and
- * useless to a command that is about to print the answer and exit — the process
- * would be gone before the lookup returned. Always the *effective* path, the one
- * requests actually take: a tunnel that is up but not routed through is not where
- * this machine is seen from, however tempting it is to report it as such.
- */
-export async function measureExit(config) {
-  if (!config.warp?.checkExitIp) return null;
-  const status = await tunnelStatus(config);
-  const throughWarp = warpEnabled(config) && status.running;
-  return refreshEgress(config.__file, throughWarp ? { proxyUrl: proxyUrl(config, status), via: "warp" } : { via: "direct" });
-}
-
 /* ------------------------------------------------------------------ *
  * Lifecycle, driven by the configuration                              *
  * ------------------------------------------------------------------ */
@@ -153,9 +114,6 @@ export async function syncTunnel(config) {
       log.error(`warp: the tunnel did not come up${result.detail ? `\n${result.detail}` : ""}`);
       return { action: "failed", detail: result.detail };
     }
-    // Measured in the background: the proxy is ready to serve either way, and
-    // the first request should not wait on a report.
-    void refreshEgress(config.__file, { proxyUrl: proxyUrl(config, result) });
     return { action: result.status };
   } catch (err) {
     log.error(`warp: ${err.message}`);
@@ -164,17 +122,18 @@ export async function syncTunnel(config) {
 }
 
 /**
- * `warp rotate`: a new WARP identity, hence a new exit IP.
+ * `warp rotate`: a new WARP identity, hence a new exit address.
  *
- * Returns both measurements so a caller can print "before → after" and a script
- * can check that the address really did change.
+ * What the new address *is* is deliberately not reported: WARP does not egress
+ * from a single one, so any figure printed here would be the address one probe
+ * happened to leave from and not the one the next request will use. What can
+ * honestly be said is that the identity was replaced and the tunnel came back up.
  */
 export async function rotate(config) {
   const result = await rotateTunnel(config);
   forgetTunnelProbe();
-  if (result.status === "failed") return { ok: false, ...result, after: null };
-  const after = await refreshEgress(config.__file, { proxyUrl: proxyUrl(config, result) });
-  return { ok: true, ...result, after };
+  if (result.status === "failed") return { ok: false, ...result };
+  return { ok: true, ...result };
 }
 
 /**
@@ -182,7 +141,7 @@ export async function rotate(config) {
  *
  * Deliberately does no probing: `/stats` is polled every couple of seconds by
  * the Status screen, and a loopback connection per poll to answer a question the
- * state file already answers would be a waste. `warpReport` is the one that asks.
+ * state file already answers would be a waste. `warpReport` checks the port.
  */
 export function warpSummary(config) {
   if (!warpEnabled(config)) return { enabled: false };
@@ -199,7 +158,6 @@ export function warpSummary(config) {
     startedAt: state.startedAt ?? null,
     rotatedAt: state.rotatedAt ?? null,
     fallbackDirect: Boolean(config.warp.fallbackDirect),
-    egress: cachedEgress(config.__file),
   };
 }
 
@@ -223,7 +181,6 @@ export async function warpReport(config) {
     rotatedAt: status.rotatedAt,
     proxyUrl: proxyUrl(config, status),
     socksUrl: `socks5://127.0.0.1:${status.socksPort}`,
-    egress: cachedEgress(config.__file),
     dir: warpDir(config.__file),
     logFile: warpPaths(config.__file).log,
   };

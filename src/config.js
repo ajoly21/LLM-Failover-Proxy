@@ -71,10 +71,6 @@ export const DEFAULTS = {
     // `true` sends it from this machine's own address instead — which is the
     // address WARP was turned on to hide, so it is never the default.
     fallbackDirect: false,
-    // Ask Cloudflare, on the same path a request takes, which address it came
-    // from — the EXIT IP column of the stats. Cached, and the only outbound
-    // request the WARP side makes on its own behalf.
-    checkExitIp: true,
   },
   probe: {
     // Deadline for one model or provider test from the terminal UI. Separate
@@ -209,7 +205,6 @@ function normalizeWarp(warp) {
     // could be read as a second setting is refused rather than escaped.
     endpoint: /^[A-Za-z0-9._-]+:\d{1,5}$/.test(endpoint) ? endpoint : base.endpoint,
     fallbackDirect: warp?.fallbackDirect === true,
-    checkExitIp: warp?.checkExitIp !== false,
   };
 }
 

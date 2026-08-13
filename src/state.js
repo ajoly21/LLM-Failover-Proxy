@@ -7,7 +7,7 @@ import { log } from "./logger.js";
 const runtime = new Map();
 
 /**
- * The last answered requests, newest first: `{ id, at, ttftMs, via, exitIp }`.
+ * The last answered requests, newest first: `{ id, at, ttftMs, via }`.
  *
  * Counters say how much a model has served; this says whether anything is
  * happening right now, and which model took it. Kept a little longer than any
@@ -66,7 +66,7 @@ export function recordStart(id) {
   state.requests += 1;
 }
 
-export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0, exit = null } = {}) {
+export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0, via = null } = {}) {
   const state = stateFor(id);
   state.successes += 1;
   state.consecutiveFailures = 0;
@@ -81,14 +81,13 @@ export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0,
   state.tokens += tokens || 0;
   // Kept per call rather than per model: the point of the list is what the last
   // few requests felt like, and an average hides exactly the one that was slow.
-  // `via` and `exitIp` say where the request left from, which is per call too: a
-  // WARP tunnel can come up, go down or be rotated between two of these rows.
+  // `via` says which way the request left, which is per call too: a WARP tunnel
+  // can come up, go down or be rotated between two of these rows.
   recent.unshift({
     id,
     at: state.lastUsedAt,
     ttftMs: nullableNum(ttftMs),
-    via: exit?.via ?? null,
-    exitIp: exit?.ip ?? null,
+    via: via ?? null,
   });
   if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT;
   flushStats();
@@ -260,7 +259,6 @@ function restoreFrom(file, knownIds) {
         // Absent from every file written before WARP existed, which is a row
         // whose path is simply unknown — not one that went out directly.
         via: typeof call.via === "string" ? call.via : null,
-        exitIp: typeof call.exitIp === "string" ? call.exitIp : null,
       }));
   }
   log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ""}`);

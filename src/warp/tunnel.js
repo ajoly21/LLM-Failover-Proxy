@@ -20,7 +20,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * ------------------------------------------------------------------ */
 
 /**
- * What is running, on which ports, and the last known exit IP.
+ * What is running, and on which ports.
  *
  * A file rather than memory because two processes take part: the proxy serves
  * requests through the tunnel, while `llmfp warp rotate` — a separate, short
@@ -98,7 +98,6 @@ export async function tunnelStatus(config) {
     endpoint: state.endpoint ?? config.warp.endpoint,
     startedAt: state.startedAt ?? null,
     rotatedAt: state.rotatedAt ?? null,
-    egress: state.egress ?? null,
     // A tunnel started for other ports than the ones now configured has to be
     // replaced, or the proxy would keep using the old one for ever.
     stale: bound && alive && (httpPort !== config.warp.httpPort || socksPort !== config.warp.socksPort),
@@ -192,8 +191,6 @@ export async function startTunnel(config, { timeoutMs = START_TIMEOUT_MS } = {})
     httpPort: config.warp.httpPort,
     endpoint: config.warp.endpoint,
     startedAt: new Date().toISOString(),
-    // The path changed, so whatever exit IP was measured before says nothing now.
-    egress: null,
   });
 
   const deadline = Date.now() + timeoutMs;
@@ -215,7 +212,7 @@ export async function stopTunnel(config, { timeoutMs = STOP_TIMEOUT_MS } = {}) {
   const state = readState(configFile);
   const pid = Number(state.pid);
   if (!processAlive(pid)) {
-    writeState(configFile, { pid: null, egress: null });
+    writeState(configFile, { pid: null });
     return { status: "not-running" };
   }
 
@@ -228,7 +225,7 @@ export async function stopTunnel(config, { timeoutMs = STOP_TIMEOUT_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!processAlive(pid)) {
-      writeState(configFile, { pid: null, egress: null });
+      writeState(configFile, { pid: null });
       return { status: "stopped", pid };
     }
     await wait(150);
@@ -237,8 +234,8 @@ export async function stopTunnel(config, { timeoutMs = STOP_TIMEOUT_MS } = {}) {
 }
 
 /**
- * Forces a new exit IP: throws the WARP device registration away and comes back
- * with a fresh one.
+ * Forces a new exit address: throws the WARP device registration away and comes
+ * back with a fresh one.
  *
  * This is the whole point of the feature for anyone rate-limited by IP, and it
  * is deliberately a plain command with no prompt, so a script or a cron job can
@@ -247,13 +244,11 @@ export async function stopTunnel(config, { timeoutMs = STOP_TIMEOUT_MS } = {}) {
  * acceptable, which is why it never happens on its own.
  */
 export async function rotateTunnel(config, { timeoutMs = START_TIMEOUT_MS } = {}) {
-  const before = readState(config.__file).egress ?? null;
   await stopTunnel(config);
   // Registering needs the executables, and asking for a new identity before they
   // exist would fail for a reason that has nothing to do with rotating.
   await ensureBinaries(config.__file);
   await ensureIdentity(config.__file, { force: true });
   writeState(config.__file, { rotatedAt: new Date().toISOString() });
-  const result = await startTunnel(config, { timeoutMs });
-  return { ...result, before };
+  return startTunnel(config, { timeoutMs });
 }

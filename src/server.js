@@ -164,7 +164,7 @@ function createSink(res, config) {
 
 /** The last answered requests, named: ids mean nothing to a reader. */
 function recentPayload(config) {
-  return recentCalls().map(({ id, at, ttftMs, via, exitIp }) => {
+  return recentCalls().map(({ id, at, ttftMs, via }) => {
     const entry = config.models.find((model) => model.id === id);
     return {
       id,
@@ -173,11 +173,10 @@ function recentPayload(config) {
       provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
       model: entry?.model ?? null,
       alias: entry?.alias ?? null,
-      // Which way this one left, and the address the provider answered back to.
-      // Added, never substituted: a reader built against an older proxy sees
-      // these missing and says so, rather than misreading another field.
+      // Which way this one left. Added, never substituted: a reader built
+      // against an older proxy sees it missing and says so, rather than
+      // misreading another field.
       via: via ?? null,
-      exitIp: exitIp ?? null,
     };
   });
 }
@@ -192,7 +191,7 @@ function statsPayload(config) {
     statsSince: statsSince(),
     totals,
     // Where requests go out, so a reader does not have to open the config file
-    // to know whether an exit IP below is supposed to be WARP's.
+    // to know what the `via` of each row below is supposed to say.
     warp: warpSummary(config),
     recent: recentPayload(config),
     providers: config.providers.map((p) => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, enabled: p.enabled })),

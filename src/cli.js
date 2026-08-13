@@ -9,7 +9,7 @@ import { c, compact, ESC, ago, ms, percent, setLogLevel } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
-import { measureExit, probeEgress, rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
+import { rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
 
 /* ------------------------------------------------------------------ *
  * Plain-text report, used by `status`, which must stay pipeable      *
@@ -192,7 +192,6 @@ function statsFromDisk(config) {
         model: entry?.model ?? null,
         alias: entry?.alias ?? null,
         via: typeof call.via === "string" ? call.via : null,
-        exitIp: typeof call.exitIp === "string" ? call.exitIp : null,
       };
     });
 
@@ -201,7 +200,7 @@ function statsFromDisk(config) {
     source: "file",
     file,
     // Read from the configuration, not from the counters: it says where requests
-    // *would* go now, which is what makes the exit IPs below readable.
+    // *would* go now, which is what makes the paths below readable.
     warp: warpSummary(config),
     recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
@@ -260,20 +259,10 @@ function printStats(stats) {
  *
  * Only ever printed when WARP is on: "direct" is the default and printing it
  * everywhere would be noise, while staying silent about a WARP that *is* on
- * would let the exit IPs be read as this machine's own address.
+ * would let a `direct` row below be read as the ordinary state.
  */
 function warpLine(warp) {
-  const { egress } = warp;
   const parts = [c.gray("outbound:"), warp.alive ? c.cyan("Cloudflare WARP") : c.red("Cloudflare WARP, tunnel down")];
-  if (egress) {
-    parts.push(c.gray("· exit"), egress.warp ? c.green(egress.ip) : c.yellow(egress.ip));
-    if (egress.colo) parts.push(c.gray(egress.colo));
-    // WARP is on, and the measurement says the traffic did not go through it.
-    if (!egress.warp) parts.push(c.yellow("— not through WARP"));
-    parts.push(c.gray(`(${ago(egress.at)})`));
-  } else if (warp.alive) {
-    parts.push(c.gray("· exit IP not measured yet"));
-  }
   if (warp.fallbackDirect) parts.push(c.gray("· falls back to direct"));
   return parts.join(" ");
 }
@@ -293,27 +282,27 @@ function printRecent(recent, limit = RECENT_ROWS) {
   say("");
   say(`  ${c.gray(`last ${calls.length} answered`)}`);
   table(
-    ["WHEN", "MODEL", "TTFT", "EXIT IP"],
+    ["WHEN", "MODEL", "TTFT", "VIA"],
     calls.map((call) => [
       ago(call.at),
       call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`),
       // A non-streamed answer arrives whole: its first token is its whole latency.
       ms(call.ttftMs),
-      exitCell(call),
+      viaCell(call),
     ]),
   );
 }
 
 /**
- * The address the provider answered back to, for one call.
+ * Which way one call left this machine.
  *
- * Coloured by path rather than by value: what a reader is checking here is "did
- * this leave through WARP or from this machine", and the point of the column is
- * that the two are told apart at a glance. A row from before this existed, or
- * one served with the measurement turned off, says what it knows and no more.
+ * `warp` stands out because that is what a reader is checking: with WARP on, a
+ * `direct` row is a request that went around the tunnel. A row recorded before
+ * this existed knows nothing about its path, which is not the same as `direct`,
+ * so it says so with a dash.
  */
-function exitCell(call) {
-  if (call.exitIp) return call.via === "warp" ? c.cyan(call.exitIp) : call.exitIp;
+function viaCell(call) {
+  if (call.via === "warp") return c.cyan("warp");
   if (call.via) return c.gray(call.via);
   return c.gray("-");
 }
@@ -372,23 +361,6 @@ function printWarp(report) {
         : c.gray(`not running (would listen on ${report.proxyUrl})`),
   );
   field("endpoint", c.gray(`${report.endpoint} ${c.gray("(UDP, must be allowed outbound)")}`));
-
-  const { egress } = report;
-  if (egress) {
-    // Green only when the measurement matches what was asked for. With routing
-    // off, an address that is *not* WARP's is the correct answer, not a warning.
-    const asExpected = report.enabled === egress.warp;
-    field(
-      "exit IP",
-      `${asExpected ? c.green(egress.ip) : c.yellow(egress.ip)} ` +
-        c.gray(
-          `· ${egress.warp ? "through WARP" : "straight from this machine"}${report.enabled && !egress.warp ? " — WARP is on, so this is wrong" : ""}` +
-            `${egress.colo ? ` · ${egress.colo}` : ""} · measured ${ago(egress.at)}`,
-        ),
-    );
-  } else {
-    field("exit IP", c.gray("could not be measured"));
-  }
   if (report.rotatedAt) field("rotated", c.gray(ago(Date.parse(report.rotatedAt))));
   field("files", c.gray(report.dir));
 }
@@ -399,8 +371,8 @@ function printWarp(report) {
  * `rotate` is the reason this exists: an address that is being rate-limited has
  * to be replaceable from a script or a cron job, at the moment that script
  * chooses and never on its own. `on`/`off` are here for the same reason — a VPS
- * has no one to open the Settings screen. All of them take `--json`, and the JSON
- * carries `ok` and, for `rotate`, `changed`: the two things a script tests.
+ * has no one to open the Settings screen. All of them take `--json`, which
+ * carries `ok`: the one thing a script can test and this tool can honestly say.
  */
 export async function warpCommand(config, args, { json = false } = {}) {
   const action = String(args[0] || "status").toLowerCase();
@@ -417,9 +389,6 @@ export async function warpCommand(config, args, { json = false } = {}) {
   }
 
   const finish = async ({ ok, note = null, extra = {} }) => {
-    // Awaited, unlike on the request path: this process is about to print the
-    // answer and exit, so a lookup left running in the background writes nothing.
-    await measureExit(config);
     const report = await warpReport(config);
     if (json) emit({ ok, action, ...extra, ...report });
     else {
@@ -471,12 +440,10 @@ export async function warpCommand(config, args, { json = false } = {}) {
               ? c.green("tunnel up")
               : c.red("the tunnel did not come up"),
       });
-      // Up but unused is a real state, and a silent one. The exit IP above is the
-      // path requests take, which is not the tunnel — so the tunnel is checked
-      // separately here, which is the question `warp up` was asking anyway.
+      // Up but unused is a real state, and a silent one: the report above says
+      // the tunnel is running and says nothing about it being used, which reads
+      // as success to somebody who ran this expecting their traffic to move.
       if (!json && !config.warp.enabled && result.status !== "failed") {
-        const through = await probeEgress({ proxyUrl: result.proxyUrl ?? `http://127.0.0.1:${config.warp.httpPort}` });
-        say(`  ${c.gray("tunnel".padEnd(9))} ${through?.warp ? c.green(`works, would leave from ${through.ip}`) : c.yellow("is up, but nothing came back through it")}`);
         say(`  ${c.yellow("note")}      ${c.gray("requests still go out directly — `llmfp warp on` routes them through it")}`);
         say("");
       }
@@ -494,17 +461,12 @@ export async function warpCommand(config, args, { json = false } = {}) {
 
     case "rotate": {
       const result = await rotate(config);
-      const before = result.before?.ip ?? null;
-      const after = result.after?.ip ?? null;
-      // Not a failure: WARP may hand back an address in the same range, and a
-      // caller that cares reads `changed` rather than guessing from the exit code.
-      const changed = Boolean(after && before !== after);
+      // What the new address is deliberately goes unsaid: WARP does not egress
+      // from a single one, so a figure printed here would be whatever address
+      // one probe happened to leave from, not the one the next request uses.
       await finish({
         ok: result.ok,
-        note: result.ok
-          ? `${c.green("rotated")} ${c.gray(`${before ?? "?"} → ${after ?? "not measured"}`)}${changed ? "" : c.gray(" (same address)")}`
-          : c.red("rotation failed, the tunnel did not come back up"),
-        extra: { changed, before, after },
+        note: result.ok ? `${c.green("rotated")} ${c.gray("new WARP identity, the tunnel is back up")}` : c.red("rotation failed, the tunnel did not come back up"),
       });
       return;
     }

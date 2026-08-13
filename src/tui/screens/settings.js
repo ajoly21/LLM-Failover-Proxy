@@ -15,6 +15,11 @@ import { envPathFor, upsertEnv } from '../../env.js';
  * the setting decides, then `choices` spells out what each answer means (the
  * current one is marked) or `example` gives the one thing worth knowing about
  * the value. Nobody should have to open the README to understand a line here.
+ *
+ * `choices` is positional — the `true` answer first — and an answer is free to
+ * be called something other than "yes". Most settings are a plain on/off and
+ * read best as one; a few are a fork between two actions, where "yes" would
+ * mean nothing without reading the hint under it.
  */
 /**
  * The six groups, in the order a request lives through them. The cooldown one
@@ -104,24 +109,14 @@ export const SETTINGS = [
     label: 'if the WARP tunnel is down',
     type: 'boolean',
     hint: 'WARP is on, but its tunnel is not answering. What happens then?',
+    // Neither answer is the "on" of the other, so neither is called yes or no:
+    // the whole decision is which of the two actions you would rather have.
     choices: [
-      ['yes', 'send it anyway, from this machine’s address — the stats say so'],
-      ['no', 'fail the request rather than reveal the address WARP hides'],
+      ['send direct', 'the request goes out from this machine’s address — the stats mark it direct'],
+      ['refuse', 'the request fails rather than reveal the address WARP was turned on to hide'],
     ],
     get: (c) => c.warp.fallbackDirect,
     set: (c, v) => { c.warp.fallbackDirect = Boolean(v); },
-  },
-  {
-    section: 'outbound',
-    label: 'measure the exit IP',
-    type: 'boolean',
-    hint: 'Ask Cloudflare which address a request went out from, for the stats.',
-    choices: [
-      ['yes', 'fills the EXIT IP column, one cached lookup every 10 minutes'],
-      ['no', 'no lookup at all; the column then only says which path was used'],
-    ],
-    get: (c) => c.warp.checkExitIp,
-    set: (c, v) => { c.warp.checkExitIp = Boolean(v); },
   },
   {
     section: 'request',
@@ -288,6 +283,9 @@ function clamp(value, min, max, fallback) {
   return Math.min(max, Math.max(min, number));
 }
 
+/** The two words a boolean setting answers with, `true` first. */
+const answersOf = (entry) => (entry.choices ?? [['yes'], ['no']]).map(([answer]) => answer);
+
 export function SettingsScreen({ config, update, notify, onBack }) {
   const [cursor, setCursor] = useState(0);
   const [draft, setDraft] = useState(null); // in-place editor buffer
@@ -369,7 +367,15 @@ export function SettingsScreen({ config, update, notify, onBack }) {
     if (focused && draft !== null) {
       display = h(TextField, { value: draft, focused: true, masked: false, placeholder: 'type a value' });
     } else if (entry.type === 'boolean') {
-      display = h(Text, { color: value ? COLOR.ok : COLOR.fail }, `${value ? SYMBOL.on : SYMBOL.off} ${value ? 'yes' : 'no'}`);
+      const [whenTrue, whenFalse] = answersOf(entry);
+      display = h(
+        Text,
+        // Green and red say "on" and "off", which is exactly what yes and no
+        // mean. A named answer is not an on/off — refusing a request is not the
+        // "off" of sending it — so it is shown plainly and ●/○ still says which.
+        { color: whenTrue === 'yes' ? (value ? COLOR.ok : COLOR.fail) : COLOR.accent },
+        `${value ? SYMBOL.on : SYMBOL.off} ${value ? whenTrue : whenFalse}`,
+      );
     } else if (entry.mask) {
       display = h(Text, { color: value ? undefined : COLOR.warn }, value ? maskSecret(value) : 'none');
     } else {
@@ -442,19 +448,24 @@ function Help({ setting, value, layout }) {
   const lines = [h(Text, { key: 'hint', dimColor: true }, `  ${setting.hint ?? ''}`)];
 
   if (setting.choices) {
-    for (const [answer, meaning] of setting.choices) {
-      const current = (answer === 'yes') === Boolean(value);
+    // Wide enough for the longer of the two, so the meanings line up under each
+    // other whatever the answers are called.
+    const width = Math.max(3, ...setting.choices.map(([answer]) => answer.length));
+    setting.choices.forEach(([answer, meaning], index) => {
+      // Positional, `true` first: matching on the word would quietly mark the
+      // wrong line the moment an answer is called anything but "yes".
+      const current = (index === 0) === Boolean(value);
       // Narrow: only the answer in force. Spelling out the other one is what
       // makes this block three wrapped lines instead of one.
-      if (layout?.narrow && !current) continue;
+      if (layout?.narrow && !current) return;
       lines.push(
         h(
           Text,
           { key: answer, color: current ? COLOR.accent : undefined, dimColor: !current },
-          `    ${current ? SYMBOL.cursor : ' '} ${cell(answer, 3)}  ${meaning}`,
+          `    ${current ? SYMBOL.cursor : ' '} ${cell(answer, width)}  ${meaning}`,
         ),
       );
-    }
+    });
   } else if (setting.example) {
     lines.push(h(Text, { key: 'example', dimColor: true }, `    ${setting.example}`));
   }

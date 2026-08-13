@@ -17,11 +17,11 @@ const RECENT_ROWS = 5;
 /**
  * What the counters cannot say: whether anything is being served right now, by
  * which model, how long the wait was before the answer started coming, and which
- * address the provider saw it come from.
+ * way out it took.
  *
  * An average would hide the one call that took eight seconds, which is the only
  * one anybody wants to know about — so these are individual calls, newest first.
- * The exit IP goes first when the screen runs out of room, then TTFT: the model
+ * The path goes first when the screen runs out of room, then TTFT: the model
  * name is what makes a row mean anything at all. On any terminal 66 columns or
  * wider all four fit, so the choice only arises on a phone.
  */
@@ -37,13 +37,13 @@ const RECENT_COLUMNS = [
   // A non-streamed answer arrives whole, so its first token is its whole latency.
   { key: 'ttft', label: 'TTFT', align: 'right', width: 8, drop: 1, text: (row) => duration(row.ttftMs) },
   {
-    key: 'exitIp',
-    label: 'EXIT IP',
-    width: 15,
+    key: 'via',
+    label: 'VIA',
+    width: 8,
     drop: 2,
-    // The address, once one has been measured; the path on its own until then,
-    // and for a row served by a proxy too old to report either.
-    text: (row) => row.exitIp || row.via || '-',
+    // A dash is a row served by a proxy too old to record the path, which is not
+    // the same as one that is known to have gone out directly.
+    text: (row) => row.via || '-',
     color: (row) => (row.via === 'warp' ? COLOR.accent : undefined),
   },
 ];
@@ -212,22 +212,18 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
  * The outbound path, on its own line and only when it is not the plain one.
  *
  * A line saying "direct" on every screen would be noise; no line at all while
- * WARP is on would let the exit IPs below be read as this machine's. When the
- * measurement says the traffic did *not* go through WARP even though it is on,
- * that is the one thing worth interrupting somebody about.
+ * WARP is on would let a `direct` row below be read as the normal state. A
+ * tunnel that is down while WARP is on is the one thing worth interrupting
+ * somebody about, because every row after it is either a failure or a leak.
  */
 function WarpLine({ warp }) {
-  const { egress } = warp;
   const up = warp.alive;
   return h(
     Text,
     { wrap: 'truncate' },
     h(Text, { dimColor: true }, '  outbound  '),
     h(Text, { color: up ? COLOR.accent : COLOR.fail }, up ? 'Cloudflare WARP' : 'Cloudflare WARP, tunnel down'),
-    egress ? h(Text, { dimColor: true }, ' · exit ') : null,
-    egress ? h(Text, { color: egress.warp ? COLOR.ok : COLOR.warn }, egress.ip) : null,
-    egress?.colo ? h(Text, { dimColor: true }, ` ${egress.colo}`) : null,
-    egress && !egress.warp ? h(Text, { color: COLOR.warn }, ' — not through WARP') : null,
+    !up && warp.fallbackDirect ? h(Text, { color: COLOR.warn }, ' — falling back to direct') : null,
     warp.rotatedAt ? h(Text, { dimColor: true }, ` · rotated ${ago(Date.parse(warp.rotatedAt))}`) : null,
   );
 }

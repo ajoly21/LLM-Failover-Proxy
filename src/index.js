@@ -30,7 +30,7 @@ const HELP = `
     stats           just the counters table, then back to the shell (--json to pipe it)
     warp            where provider requests go out from ${c.gray("(status by default)")}
                     ${c.gray("`warp on|off` routes through Cloudflare WARP or straight out")}
-                    ${c.gray("`warp rotate` forces a new WARP exit IP · `warp up|down` the tunnel")}
+                    ${c.gray("`warp rotate` forces a new WARP identity · `warp up|down` the tunnel")}
     logs            show the end of the background log
     doctor          check this install: PATH, paths in the login entry, keys, service
     help, version
@@ -288,7 +288,7 @@ async function main() {
     }
 
     // The outbound path: which address the providers see, and how to change it.
-    // Every subcommand is non-interactive, so a cron job can rotate the exit IP.
+    // Every subcommand is non-interactive, so a cron job can rotate the identity.
     case "warp": {
       await warpCommand(loadConfig(options.configFile), options.args, { json: options.json });
       return;

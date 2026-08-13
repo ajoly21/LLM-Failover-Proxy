@@ -5,7 +5,7 @@ import { AttemptError, classifyStatus, ClientGoneError, parseRetryAfter, REASONS
 import { c, compact, log, ms } from "./logger.js";
 import { createSseParser, SSE_DONE } from "./sse.js";
 import { cooldownRemaining, isCoolingDown, recordCancelled, recordFailure, recordStart, recordSuccess } from "./state.js";
-import { exitFor, fetchVia, outboundPath } from "./warp/index.js";
+import { fetchVia, outboundPath } from "./warp/index.js";
 
 const norm = (value) =>
   String(value || "")
@@ -660,9 +660,9 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
         // A non-streamed answer has no first token of its own: the whole body
         // arrives at once, so the wait that ended is the request's own latency.
         const ttft = outcome.committedAt ? outcome.committedAt - task.startedAt : latency;
-        // The address this answer came back to, as last measured on this same
-        // path: what makes `/stats` able to say VPS or WARP, per request.
-        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage), exit: exitFor(config, path) });
+        // The way this one left, decided once for the whole chain above: what
+        // makes `/stats` able to say WARP or direct, per request.
+        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage), via: path.via });
         log.info(
           `[${requestId}] ${c.green("ok")} ${target} (${place}${streaming ? ", stream" : ""}) ${ms(latency)}` +
             `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ""}` +
