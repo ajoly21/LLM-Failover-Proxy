@@ -892,7 +892,7 @@ test('the proxy key is written to the .env, whether it is typed or generated', a
   }
 });
 
-test('every setting explains itself, and every yes/no spells out both answers', () => {
+test('every setting explains itself, and every two-way one spells out both answers', () => {
   // A setting nobody can understand from the screen is a setting nobody will
   // touch on purpose — the explanation is part of the contract, not decoration.
   for (const setting of SETTINGS) {
@@ -900,12 +900,12 @@ test('every setting explains itself, and every yes/no spells out both answers', 
     assert.ok(setting.hint.length <= 90, `${setting.label}: hint too long for a terminal line`);
 
     if (setting.type === 'boolean') {
-      assert.deepEqual(
-        setting.choices?.map(([answer]) => answer),
-        ['yes', 'no'],
-        `${setting.label}: both answers must be spelled out, in that order`,
-      );
+      // Two answers, and the `true` one first: the screen marks the one in force
+      // by position, so a pair written the other way round would mark the wrong
+      // line. The words themselves are free — not every fork is a yes/no.
+      assert.equal(setting.choices?.length, 2, `${setting.label}: both answers must be spelled out`);
       for (const [answer, meaning] of setting.choices) {
+        assert.ok(answer?.length > 0 && answer.length <= 12, `${setting.label}: "${answer}" is not a readable answer`);
         assert.ok(meaning.length > 10 && meaning.length <= 80, `${setting.label}/${answer}: unhelpful or too long`);
       }
     } else {
@@ -930,6 +930,7 @@ test('settings are grouped by moment, and the groups never come back', async () 
   const app = await mount({ view: { name: 'settings' } });
   try {
     assert.match(app.frame(), /Where it listens/);
+    assert.match(app.frame(), /How it reaches the providers/, 'the outbound path is visible without scrolling for it');
     assert.match(app.frame(), /While one request is in flight/);
     assert.match(app.frame(), /\d+-\d+ of \d+/, 'the list is windowed, not clipped');
 
@@ -956,6 +957,32 @@ test('the settings help marks the answer currently in force', async () => {
     frame = app.frame();
     assert.match(frame, /▸ yes\s+HTTP 404 straight away/, 'the mark follows the value');
     assert.doesNotMatch(frame, /▸ no\s+the whole chain/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a setting that is a fork between two actions names them, rather than answering yes or no', async () => {
+  const app = await mount({ view: { name: 'settings' } });
+  try {
+    await app.press(KEY.down, SETTINGS.findIndex((setting) => setting.label === 'if the WARP tunnel is down'));
+
+    // "yes" here would mean nothing: neither answer is the other one turned off,
+    // and the one in force is the one that decides whether an address leaks.
+    let frame = app.frame();
+    assert.doesNotMatch(frame, /if the WARP tunnel is down\s+[●○] (yes|no)\b/, 'a fork is not a yes/no');
+    assert.match(frame, /if the WARP tunnel is down\s+[●○] refuse/, 'refusing is the default, and says so on the row');
+    assert.match(frame, /▸ refuse\s+the request fails rather than reveal/, 'the answer in force is the one marked');
+    assert.doesNotMatch(frame, /▸ send direct/);
+
+    await app.press(KEY.right); // refuse → send direct
+    assert.equal(app.config().warp.fallbackDirect, true);
+    frame = app.frame();
+    // The mark is found by position, `true` first, so this is the assertion that
+    // fails if the pair is ever written the other way round.
+    assert.match(frame, /if the WARP tunnel is down\s+[●○] send direct/);
+    assert.match(frame, /▸ send direct\s+the request goes out from this machine/);
+    assert.doesNotMatch(frame, /▸ refuse/);
   } finally {
     await app.close();
   }

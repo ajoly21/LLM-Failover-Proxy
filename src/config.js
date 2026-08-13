@@ -54,6 +54,24 @@ export const DEFAULTS = {
       maxMs: 300000,
     },
   },
+  // How the providers are reached. Off means straight out from this machine,
+  // which is what every version before this one did and still the default: an
+  // upgrade changes nothing until somebody turns this on.
+  warp: {
+    // Route every provider request through Cloudflare WARP instead.
+    enabled: false,
+    // Local proxies the tunnel exposes. High and out of the way, like the
+    // proxy's own port; the SOCKS one is there for whatever else you point at it.
+    socksPort: 25344,
+    httpPort: 25345,
+    // Cloudflare's anycast WARP endpoint. Needs outbound UDP to this port, which
+    // is the one thing a restrictive network tends to block.
+    endpoint: "162.159.192.1:2408",
+    // WARP is on but its tunnel is not answering. `false` fails the request,
+    // `true` sends it from this machine's own address instead — which is the
+    // address WARP was turned on to hide, so it is never the default.
+    fallbackDirect: false,
+  },
   probe: {
     // Deadline for one model or provider test from the terminal UI. Separate
     // from the request deadlines above: a benchmark that hangs should not be
@@ -159,6 +177,9 @@ export function loadConfig(file = configPath()) {
   const config = withDefaults(raw, DEFAULTS);
   config.providers = Array.isArray(raw.providers) ? raw.providers.map(normalizeProvider) : [];
   config.models = Array.isArray(raw.models) ? raw.models.map(normalizeModel) : [];
+  // A file written before WARP existed has no `warp` block at all; `withDefaults`
+  // has already filled it in, and this bounds whatever a newer file carries.
+  config.warp = normalizeWarp(config.warp);
 
   // The current names, or the ones a file written before the rename carries.
   const lists = Array.isArray(raw.modelLists) ? raw.modelLists : raw[LEGACY_KEYS.lists];
@@ -179,6 +200,7 @@ export function saveConfig(config, file = config.__file || configPath()) {
   const { __file, ...clean } = config;
   clean.providers = clean.providers.map(normalizeProvider);
   clean.models = clean.models.map(normalizeModel);
+  clean.warp = normalizeWarp(clean.warp);
   clean.modelLists = clean.modelLists.map(normalizeTarget);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -191,6 +213,36 @@ export function saveConfig(config, file = config.__file || configPath()) {
   }
   config.__file = file;
   return file;
+}
+
+/**
+ * A hand-edited `warp` block is a normal thing to find, and these values are not
+ * inert: two become ports a tunnel binds and this proxy connects to, one is
+ * written into a spawned process's configuration file. So they are bounded here
+ * rather than trusted, the same way a provider or a model is.
+ */
+function normalizeWarp(warp) {
+  const base = DEFAULTS.warp;
+  const port = (value, fallback) => {
+    const number = Math.trunc(Number(value));
+    return Number.isFinite(number) && number >= 1024 && number <= 65535 ? number : fallback;
+  };
+  let socksPort = port(warp?.socksPort, base.socksPort);
+  let httpPort = port(warp?.httpPort, base.httpPort);
+  // One process cannot bind both to the same port, and it would fail with a
+  // message about the tunnel rather than about the typo that caused it.
+  if (socksPort === httpPort) [socksPort, httpPort] = [base.socksPort, base.httpPort];
+
+  const endpoint = String(warp?.endpoint ?? "").trim();
+  return {
+    enabled: warp?.enabled === true,
+    socksPort,
+    httpPort,
+    // `host:port` only: this ends up in a generated config file, so anything that
+    // could be read as a second setting is refused rather than escaped.
+    endpoint: /^[A-Za-z0-9._-]+:\d{1,5}$/.test(endpoint) ? endpoint : base.endpoint,
+    fallbackDirect: warp?.fallbackDirect === true,
+  };
 }
 
 function normalizeProvider(provider) {

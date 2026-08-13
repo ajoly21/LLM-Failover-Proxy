@@ -18,10 +18,11 @@ import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } fr
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
 import { checkForUpdate, updateCommand, updateCommandLine } from "./update.js";
-import { c, compact, ESC, ago, ms, percent } from "./logger.js";
+import { c, compact, ESC, ago, ms, percent, setLogLevel } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
+import { rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
 
 /* ------------------------------------------------------------------ *
  * Plain-text report, used by `status`, which must stay pipeable      *
@@ -81,6 +82,10 @@ export async function showStatus(config) {
       service.running ? `${c.green("running")} ${c.gray(`pid ${service.pid} · ${service.url}`)}` : c.gray("not running in the background")
     }   ${c.gray("at login:")} ${autostartInstalled() ? c.green("yes") : c.gray("no")} ${c.gray(`(${autostartTarget().label})`)}`,
   );
+  // Where provider requests go out. Said on every report, both ways round: this
+  // one decides which address a provider rate-limits, so silence is not neutral.
+  const warp = warpSummary(config);
+  say(`  ${warp.enabled ? warpLine(warp) : `${c.gray("outbound:")} ${c.gray("direct, from this machine")} ${c.gray("· `llmfp warp on` routes through Cloudflare WARP")}`}`);
 
   say("");
   say(c.bold("Providers"));
@@ -485,6 +490,7 @@ function statsFromDisk(config) {
         provider: entry ? providerLabel(config, entry.providerId) : null,
         model: entry?.model ?? null,
         alias: entry?.alias ?? null,
+        via: typeof call.via === "string" ? call.via : null,
       };
     });
 
@@ -496,6 +502,9 @@ function statsFromDisk(config) {
   return {
     source: "file",
     file,
+    // Read from the configuration, not from the counters: it says where requests
+    // *would* go now, which is what makes the paths below readable.
+    warp: warpSummary(config),
     elsewhere,
     recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
@@ -524,6 +533,7 @@ function printStats(stats) {
         `${compact(stats.totals.cancelled)} cancelled, ${compact(stats.totals.tokens)} token(s)`,
     ),
   );
+  if (stats.warp?.enabled) say(`  ${warpLine(stats.warp)}`);
   table(
     ["PRIO", "TARGET", "REQ", "OK", "KO", "CX", "USE", "UPTIME", "TOKENS", "LAST USED", "LAST ERROR"],
     // Already in the configuration's order, from whichever source produced it.
@@ -551,6 +561,19 @@ function printStats(stats) {
   printRecent(stats.recent);
 }
 
+/**
+ * One line saying where requests leave from, shared by `stats` and `status`.
+ *
+ * Only ever printed when WARP is on: "direct" is the default and printing it
+ * everywhere would be noise, while staying silent about a WARP that *is* on
+ * would let a `direct` row below be read as the ordinary state.
+ */
+function warpLine(warp) {
+  const parts = [c.gray("outbound:"), warp.alive ? c.cyan("Cloudflare WARP") : c.red("Cloudflare WARP, tunnel down")];
+  if (warp.fallbackDirect) parts.push(c.gray("· falls back to direct"));
+  return parts.join(" ");
+}
+
 /** Rows shown of the last answered requests. */
 const RECENT_ROWS = 5;
 
@@ -566,14 +589,29 @@ function printRecent(recent, limit = RECENT_ROWS) {
   say("");
   say(`  ${c.gray(`last ${calls.length} answered`)}`);
   table(
-    ["WHEN", "MODEL", "TTFT"],
+    ["WHEN", "MODEL", "TTFT", "VIA"],
     calls.map((call) => [
       ago(call.at),
       call.model ? `${call.provider}/${call.model}` : c.gray(`${call.id} (no longer configured)`),
       // A non-streamed answer arrives whole: its first token is its whole latency.
       ms(call.ttftMs),
+      viaCell(call),
     ]),
   );
+}
+
+/**
+ * Which way one call left this machine.
+ *
+ * `warp` stands out because that is what a reader is checking: with WARP on, a
+ * `direct` row is a request that went around the tunnel. A row recorded before
+ * this existed knows nothing about its path, which is not the same as `direct`,
+ * so it says so with a dash.
+ */
+function viaCell(call) {
+  if (call.via === "warp") return c.cyan("warp");
+  if (call.via) return c.gray(call.via);
+  return c.gray("-");
 }
 
 /**
@@ -604,6 +642,145 @@ export async function showStats(config, { json = false } = {}) {
   say("");
   printStats(stats);
   say("");
+}
+
+/* ------------------------------------------------------------------ *
+ * `warp`: the outbound path, driven from a shell                       *
+ * ------------------------------------------------------------------ */
+
+export const WARP_ACTIONS = ["status", "on", "off", "up", "down", "rotate"];
+
+/** The WARP block of a report, the same shape whoever asked for it. */
+function printWarp(report) {
+  const field = (label, value) => say(`  ${c.gray(label.padEnd(9))} ${value}`);
+
+  field("routing", report.enabled ? c.green("through Cloudflare WARP") : c.gray("direct, from this machine"));
+  if (!report.supported) {
+    field("platform", c.yellow(report.unsupportedReason));
+    return;
+  }
+  field(
+    "tunnel",
+    report.running
+      ? `${c.green("running")} ${c.gray(`pid ${report.pid} · http ${report.proxyUrl} · ${report.socksUrl}`)}`
+      : report.foreign
+        ? `${c.yellow(`port ${report.httpPort} is taken by something else`)} ${c.gray("— free it, or set another one in the config")}`
+        : c.gray(`not running (would listen on ${report.proxyUrl})`),
+  );
+  field("endpoint", c.gray(`${report.endpoint} ${c.gray("(UDP, must be allowed outbound)")}`));
+  if (report.rotatedAt) field("rotated", c.gray(ago(Date.parse(report.rotatedAt))));
+  field("files", c.gray(report.dir));
+}
+
+/**
+ * Every WARP operation, with no prompt and no terminal UI.
+ *
+ * `rotate` is the reason this exists: an address that is being rate-limited has
+ * to be replaceable from a script or a cron job, at the moment that script
+ * chooses and never on its own. `on`/`off` are here for the same reason — a VPS
+ * has no one to open the Settings screen. All of them take `--json`, which
+ * carries `ok`: the one thing a script can test and this tool can honestly say.
+ */
+export async function warpCommand(config, args, { json = false } = {}) {
+  const action = String(args[0] || "status").toLowerCase();
+  // `log.info` writes to stdout, which in JSON mode would land inside the object.
+  if (json) setLogLevel("error");
+  const emit = (payload) => process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+
+  if (!WARP_ACTIONS.includes(action)) {
+    const error = `Unknown warp command "${action}". Expected one of: ${WARP_ACTIONS.join(", ")}.`;
+    if (json) emit({ ok: false, action, error });
+    else process.stderr.write(`${error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const finish = async ({ ok, note = null, extra = {} }) => {
+    const report = await warpReport(config);
+    if (json) emit({ ok, action, ...extra, ...report });
+    else {
+      say("");
+      if (note) say(`  ${note}`);
+      printWarp(report);
+      // Only when something went wrong: the tunnel's own log is the only place
+      // that says why, and nobody would think to look for it otherwise.
+      if (!ok) {
+        const tail = tunnelLogTail(config.__file, 8);
+        if (tail) {
+          say("");
+          say(`  ${c.gray(report.logFile)}`);
+          say(tail.replace(/^/gm, "    "));
+        }
+      }
+      say("");
+    }
+    if (!ok) process.exitCode = 1;
+  };
+
+  switch (action) {
+    case "on":
+    case "off": {
+      const wanted = action === "on";
+      const already = config.warp.enabled === wanted;
+      config.warp.enabled = wanted;
+      saveConfig(config);
+      // Brought in line at once rather than at the next start: somebody who just
+      // typed `warp on` expects the next request to already go that way.
+      const sync = await syncTunnel(config);
+      const ok = !["failed", "unsupported"].includes(sync.action);
+      await finish({
+        ok,
+        note: `${wanted ? c.green("routing through WARP") : c.gray("routing directly")}${already ? c.gray(" (unchanged)") : ""}`,
+        extra: { changed: !already },
+      });
+      return;
+    }
+
+    case "up": {
+      const result = await startTunnel(config);
+      await finish({
+        ok: result.status !== "failed",
+        note:
+          result.status === "already-running"
+            ? c.gray("tunnel already up")
+            : result.status === "started"
+              ? c.green("tunnel up")
+              : c.red("the tunnel did not come up"),
+      });
+      // Up but unused is a real state, and a silent one: the report above says
+      // the tunnel is running and says nothing about it being used, which reads
+      // as success to somebody who ran this expecting their traffic to move.
+      if (!json && !config.warp.enabled && result.status !== "failed") {
+        say(`  ${c.yellow("note")}      ${c.gray("requests still go out directly — `llmfp warp on` routes them through it")}`);
+        say("");
+      }
+      return;
+    }
+
+    case "down": {
+      const result = await stopTunnel(config);
+      await finish({
+        ok: result.status !== "failed",
+        note: result.status === "stopped" ? c.green("tunnel stopped") : result.status === "not-running" ? c.gray("no tunnel was running") : c.red(`could not stop pid ${result.pid}`),
+      });
+      return;
+    }
+
+    case "rotate": {
+      const result = await rotate(config);
+      // What the new address is deliberately goes unsaid: WARP does not egress
+      // from a single one, so a figure printed here would be whatever address
+      // one probe happened to leave from, not the one the next request uses.
+      await finish({
+        ok: result.ok,
+        note: result.ok ? `${c.green("rotated")} ${c.gray("new WARP identity, the tunnel is back up")}` : c.red("rotation failed, the tunnel did not come back up"),
+      });
+      return;
+    }
+
+    default:
+      await finish({ ok: true });
+  }
 }
 
 /* ------------------------------------------------------------------ *
