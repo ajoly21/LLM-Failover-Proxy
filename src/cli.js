@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
+import { activeTarget, configExists, configPath, describeKey, inlineKeys, loadConfig, providerLabel, resolveSecret, statsPathFor } from "./config.js";
 import { autostartHealth, autostartInstalled, autostartTarget, daemonStatus } from "./daemon.js";
 import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
@@ -39,11 +39,15 @@ const keyCell = (provider) => {
 };
 
 export async function showStatus(config) {
+  const { target: list, total: lists } = activeTarget(config);
   say("");
   say(`  ${c.bold(c.green("llm-failover-proxy"))} ${c.gray("— OpenAI-compatible proxy with provider failover")}`);
   say(
     `  ${c.gray("config:")} ${config.__file}   ${c.gray("listen:")} http://${config.server.host}:${config.server.port}` +
-      `   ${c.gray("providers:")} ${config.providers.length}   ${c.gray("models:")} ${config.models.length}`,
+      `   ${c.gray("providers:")} ${config.providers.length}   ${c.gray("models:")} ${config.models.length}` +
+      // Which of several chains these numbers describe, so a chain that looks
+      // wrong reads as "the other list is live" rather than as lost models.
+      (lists > 1 ? `   ${c.gray("list:")} ${list.name} ${c.gray(`(${lists} in all)`)}` : ""),
   );
   const envFile = envPathFor(config.__file);
   say(`  ${c.gray("keys:")} ${envFile} ${fs.existsSync(envFile) ? c.gray("(found)") : c.yellow("(no .env yet)")}`);
@@ -78,7 +82,9 @@ export async function showStatus(config) {
   }
 
   say("");
-  say(`${c.bold("Model chain")} ${c.gray("(order = failover priority)")}`);
+  say(
+    `${c.bold("Model chain")}${lists > 1 ? ` ${c.gray("— list")} ${list.name}` : ""} ${c.gray("(order = failover priority)")}`,
+  );
   if (!config.models.length) say(c.gray("  (none)"));
   else {
     table(
@@ -131,8 +137,11 @@ async function liveStats(config) {
     if (!response.ok) return null;
     const payload = await response.json();
     // The answering proxy numbers the chain from its own configuration; this one
-    // has to read in the order of ours, the same as every other screen.
-    return { ...payload, chain: alignChain(config.models, payload.chain, (id) => providerLabel(config, id)), source: "server" };
+    // has to read in the order of ours, the same as every other screen. Anything
+    // it reported beyond our chain — another target list, or another config file
+    // altogether — is counted and left out, since these are the live list's stats.
+    const aligned = alignChain(config.models, payload.chain, (id) => providerLabel(config, id));
+    return { ...payload, chain: aligned.slice(0, config.models.length), elsewhere: aligned.length - config.models.length, source: "server" };
   } catch {
     return null;
   }
@@ -190,9 +199,14 @@ function statsFromDisk(config) {
     });
 
   const total = (key) => chain.reduce((sum, row) => sum + row[key], 0);
+  // Counters kept for models this list does not have: the other lists' history,
+  // which is read from the same file but is not this list's to report.
+  const own = new Set(config.models.map((entry) => entry.id));
+  const elsewhere = Object.keys(saved).filter((id) => !own.has(id)).length;
   return {
     source: "file",
     file,
+    elsewhere,
     recent,
     statsSince: Number.isFinite(raw?.since) ? raw.since : null,
     updatedAt: Number.isFinite(raw?.updatedAt) ? raw.updatedAt : null,
@@ -240,6 +254,9 @@ function printStats(stats) {
       row.lastError ? c.red(`${row.lastError.reason}: ${String(row.lastError.message).slice(0, 60)}`) : c.gray("-"),
     ]),
   );
+  if (stats.elsewhere > 0) {
+    say(c.gray(`  ${stats.elsewhere} more model(s) served, in another list or another config — not counted above`));
+  }
 
   printRecent(stats.recent);
 }
