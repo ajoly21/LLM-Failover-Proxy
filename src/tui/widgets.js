@@ -43,6 +43,9 @@ export function Frame({ title, subtitle, children, footer }) {
  * narrow terminal: on a phone these hints wrap over three lines and eat the rows
  * they are meant to explain. Whatever is not optional always shows, so the way
  * out of a screen is never the thing that disappears.
+ *
+ * Used for every hint the UI writes, wherever it sits — under the frame, or on a
+ * line among the content — so one key never has two looks.
  */
 export function Hints({ items }) {
   const layout = useLayout();

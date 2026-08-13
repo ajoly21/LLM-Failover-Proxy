@@ -33,6 +33,13 @@ const KEY = {
 
 const tick = (times = 2) => new Promise((resolve) => setTimeout(resolve, 20 * times));
 
+/** The hint lines under the frame, which is where the keys of a screen are written. */
+const footer = (app) => {
+  const lines = app.lines();
+  const border = lines.findIndex((line) => line.includes('╰'));
+  return lines.slice(border + 1).join(' ');
+};
+
 /**
  * A terminal of a chosen size. The shared test renderer is fixed at 100 columns
  * and has no height at all, so anything about fitting a small screen has to go
@@ -168,7 +175,7 @@ test('home screen lists the menu and reports the configuration', async () => {
     const frame = app.frame();
     assert.match(frame, /llm-failover-proxy/);
     assert.match(frame, /Providers/);
-    assert.match(frame, /Target lists/);
+    assert.match(frame, /Models lists/);
     assert.match(frame, /Status & stats/);
     assert.match(frame, /127\.0\.0\.1:47821/);
     assert.match(frame, /providers 1/);
@@ -237,7 +244,7 @@ test('a fresh configuration opens on the wizard, and "from scratch" leads to the
 
     await app.press(KEY.down); // → Start from scratch
     await app.press(KEY.enter);
-    assert.match(app.frame(), /Target lists/, 'lands on the home menu');
+    assert.match(app.frame(), /Models lists/, 'lands on the home menu');
     assert.equal(app.config().providers.length, 0);
   } finally {
     await app.close();
@@ -407,7 +414,7 @@ test('models screen reorders the chain with shift+arrows and J/K', async () => {
   }
 });
 
-test('a second target list is added, named in place, and reached with the arrows', async () => {
+test('a second model list is added, named in place, and reached with the arrows', async () => {
   const app = await mount({
     providers: [provider('groq')],
     models: [model('first', 'groq'), model('second', 'groq')],
@@ -416,7 +423,11 @@ test('a second target list is added, named in place, and reached with the arrows
   const chain = () => app.config().models.map((entry) => entry.model);
   try {
     assert.match(app.frame(), /list\s+default\s+1\/1/, 'the list in use is named on screen');
-    assert.match(app.frame(), /←→ switch list · n new · N copy · r rename/, 'and how to get another one');
+    // Every key that acts on a list is written under the list itself…
+    assert.match(app.frame(), /←→ switch list · n new list · c copy list · r rename list/, 'and how to get another one');
+    // …and nowhere else: the hints at the foot of the screen are the chain's.
+    assert.match(footer(app), /↑↓ move · m reorder · a add · e edit · space enable · d delete · t test all · esc back/);
+    assert.doesNotMatch(footer(app), /list/, 'no list key is repeated down there');
 
     // n opens the field, and the name is typed where the name is shown.
     await app.press('n');
@@ -454,7 +465,7 @@ test('a second target list is added, named in place, and reached with the arrows
   }
 });
 
-test('N copies the list in use, and x deletes one', async () => {
+test('c copies the list in use, and x deletes one', async () => {
   const app = await mount({
     providers: [provider('groq')],
     models: [model('first', 'groq'), model('second', 'groq')],
@@ -463,7 +474,8 @@ test('N copies the list in use, and x deletes one', async () => {
   const chain = () => app.config().models.map((entry) => entry.model);
   try {
     // The copy is offered under a name of its own, prefilled so enter is enough.
-    await app.press('N');
+    // `c`, not a shifted `n`, which reads as a second way to say "new list".
+    await app.press('c');
     assert.match(app.frame(), /copy: default copy/, 'prefilled with a name derived from the original');
     await app.press(KEY.enter);
 
@@ -497,7 +509,7 @@ test('N copies the list in use, and x deletes one', async () => {
   }
 });
 
-test('the last target list cannot be deleted, and does not offer to be', async () => {
+test('the last model list cannot be deleted, and does not offer to be', async () => {
   const app = await mount({
     providers: [provider('groq')],
     models: [model('first', 'groq')],
@@ -515,7 +527,7 @@ test('the last target list cannot be deleted, and does not offer to be', async (
   }
 });
 
-test('a single target list has nowhere to switch to, and says nothing about it', async () => {
+test('a single model list has nowhere to switch to, and says nothing about it', async () => {
   const app = await mount({
     providers: [provider('groq')],
     models: [model('first', 'groq')],
@@ -581,7 +593,7 @@ test('escape drops a held model where it is, rather than putting it back', async
     await app.press(KEY.escape);
     assert.deepEqual(app.config().models.map((entry) => entry.model), ['second', 'first']);
     // Still on the models screen: escape dropped the model, it did not go back.
-    assert.match(app.frame(), /Target list/);
+    assert.match(app.frame(), /Models lists/);
   } finally {
     await app.close();
   }
@@ -1041,7 +1053,7 @@ test('escape walks back to the home screen', async () => {
   try {
     assert.match(app.frame(), /PROTOCOL/);
     await app.press(KEY.escape);
-    assert.match(app.frame(), /Target lists/, 'back on the home menu');
+    assert.match(app.frame(), /Models lists/, 'back on the home menu');
   } finally {
     await app.close();
   }
@@ -1181,24 +1193,26 @@ test('on a phone-sized terminal, no screen overflows in either direction', async
     }
   }
 
-  // The worst case for this screen: several lists, so `x delete list` is offered
-  // as well and every list key has to fit in hints that already wrap four lines.
+  // The worst case for this screen: several lists, so `x delete` is offered as
+  // well, and a screen this short has no room for the line under the list name —
+  // so every list key has to fall back into hints that already wrap.
   const crowded = await mount({
     ...PHONE,
     providers: [provider('groq')],
     models,
     targets: [
-      { id: 'tgt_a', name: 'default', models: [] },
-      { id: 'tgt_b', name: 'cheap-and-fast', models: [] },
+      { id: 'lst_a', name: 'default', models: [] },
+      { id: 'lst_b', name: 'cheap-and-fast', models: [] },
     ],
-    activeTargetId: 'tgt_b',
+    activeTargetId: 'lst_b',
     view: { name: 'models' },
   });
   try {
     const { width, height } = shape(crowded);
-    assert.ok(width <= PHONE.columns, `the target list screen is ${width} columns wide, the terminal has ${PHONE.columns}`);
-    assert.ok(height <= PHONE.rows, `the target list screen needs ${height} rows, the terminal has ${PHONE.rows}`);
-    assert.match(crowded.frame(), /x delete list/, 'and the key to remove one is reachable there too');
+    assert.ok(width <= PHONE.columns, `the models lists screen is ${width} columns wide, the terminal has ${PHONE.columns}`);
+    assert.ok(height <= PHONE.rows, `the models lists screen needs ${height} rows, the terminal has ${PHONE.rows}`);
+    assert.match(crowded.frame(), /c copy/, 'the list keys survive a screen with no room for their own line');
+    assert.match(crowded.frame(), /x delete/, 'and the key to remove one is reachable there too');
   } finally {
     await crowded.close();
   }

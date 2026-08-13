@@ -27,6 +27,24 @@ const STATE_COLOR = { ok: COLOR.ok, fail: COLOR.fail, running: COLOR.warn, queue
 /** What the name being typed is for. */
 const PROMPT_LABEL = { new: "new", copy: "copy", rename: "rename" };
 
+/**
+ * The keys that act on the whole list, as `[keys, label]` pairs.
+ *
+ * One source for the two places they can be written — the line under the list
+ * name, and the hints at the foot of a screen too short for that line — so the
+ * two can never disagree about which key does what. `long` spells the labels out
+ * where there is room for it.
+ */
+const listHints = (listCount, long) =>
+  [
+    ["←→", long ? "switch list" : "list"],
+    ["n", long ? "new list" : "new"],
+    ["c", long ? "copy list" : "copy"],
+    ["r", long ? "rename list" : "rename"],
+    // Never the last one: something has to be served.
+    listCount > 1 ? ["x", long ? "delete list" : "delete"] : null,
+  ].filter(Boolean);
+
 export function ModelsScreen({ config, update, notify, navigate, onBack, spacingMs }) {
   const spacing = spacingMs ?? TEST_SPACING_MS;
   const [cursor, setCursor] = useState(0);
@@ -171,8 +189,10 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
     else if (key.leftArrow) switchList(-1);
     else if (key.rightArrow) switchList(1);
     else if (input === "n") setPrompt({ mode: "new", value: "" });
-    // Prefilled, so the copy is one keypress away and still gets a name of its own.
-    else if (input === "N") setPrompt({ mode: "copy", value: `${list?.name ?? DEFAULT_TARGET_NAME} copy` });
+    // `c`, not `N`: a shifted `n` reads as a variant of "new list" and got pressed
+    // for one. Prefilled, so the copy is one keypress away and still gets a name
+    // of its own.
+    else if (input === "c") setPrompt({ mode: "copy", value: `${list?.name ?? DEFAULT_TARGET_NAME} copy` });
     else if (input === "r") setPrompt({ mode: "rename", value: list?.name ?? "" });
     else if (input === "x" && listCount > 1) setConfirming("list");
     else if (input === "m" && models.length > 1) setHolding(true);
@@ -224,19 +244,20 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
   const detail = tests[selected?.id];
   const done = Object.values(tests).filter((test) => test.state === "ok" || test.state === "fail").length;
 
-  // The two things this screen is about — which list, and how to reach another —
-  // on the line above the chain itself, rather than a screen away.
-  // `x` is offered only where it leads somewhere: the last list cannot go. On a
-  // phone only the switcher fits here, so the rest is left to the hints below,
-  // which wrap instead of truncating.
-  const barHint = prompt
-    ? "  enter saves it · esc cancels"
-    : layout.narrow
-      ? "  ←→ switch list"
-      : `  ←→ switch list · n new · N copy · r rename${listCount > 1 ? " · x delete" : ""}`;
+  // Keys that act on the list rather than on a model. They belong next to the
+  // list they act on, so they are written under its name — and only there, which
+  // leaves the hints at the foot of the screen to the chain itself. `x` is offered
+  // only where it leads somewhere: the last list cannot go.
+  const listKeys = listHints(listCount, !layout.narrow);
+  const barItems = prompt
+    ? [
+        ["enter", "saves it"],
+        ["esc", "cancels"],
+      ]
+    : listKeys;
   // Rows this screen needs around the table: the frame, the title, the hints, the
-  // list bar and its blank line, the detail line. The hints wrap on a narrow
-  // terminal — by one line more once `x delete list` has joined them.
+  // list bar and its blank line, the detail line. Both hint lines wrap on a
+  // narrow terminal — by one line more once `x delete list` has joined them.
   const reserved = (holding ? 9 : 11) + (layout.short ? 1 : 3) + (layout.narrow ? (listCount > 1 ? 3 : 2) : 0);
   const bar = h(
     Box,
@@ -262,13 +283,19 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
             h(Text, { dimColor: true }, `  ${listIndex + 1}/${listCount}`),
           ),
     ),
-    layout.short ? null : h(Text, { dimColor: true, wrap: "truncate" }, barHint),
+    // Drawn by the same widget as the hints under the frame, so a key looks the
+    // same wherever it is written: the glyph in the accent colour, the words
+    // around it dimmed.
+    //
+    // Wrapped on a narrow terminal on purpose: while this line is shown it is the
+    // only place the list keys are written, so cutting its tail would lose them.
+    layout.short ? null : h(Text, { wrap: layout.narrow ? "wrap" : "truncate" }, "  ", h(Hints, { items: barItems })),
   );
 
   return h(
     Frame,
     {
-      title: "Target list",
+      title: "Models lists",
       subtitle: holding ? `moving ${selected?.alias ?? ""}` : `${models.length} in the chain · order = failover priority`,
       footer: h(Hints, {
         items: prompt
@@ -281,13 +308,13 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
                 ["↑↓", "move it"],
                 ["enter", "drop it here"],
               ]
-            : [
+            : // The chain, and nothing else: what acts on a list is written above
+              // the table, on the line naming the list it would act on. Unless
+              // that line had to go — a short screen spends its rows on models —
+              // in which case the list keys fall back here rather than vanish.
+              [
+                ...(layout.short ? listKeys : []),
                 ["↑↓", "move"],
-                ["←→", "list"],
-                ["n", "new list"],
-                ["N", "copy list"],
-                ["r", "rename"],
-                listCount > 1 ? ["x", "delete list"] : null,
                 ["m", "reorder"],
                 ["a", "add"],
                 ["e", "edit"],

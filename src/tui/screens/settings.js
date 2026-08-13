@@ -226,7 +226,7 @@ export const SETTINGS = [
     label: 'model test timeout',
     type: 'number',
     unit: 'ms',
-    hint: 'Not a request: how long a test you started from Target lists may take.',
+    hint: 'Not a request: how long a test you started from Models lists may take.',
     example: 'only for the tests you run yourself; the deadlines above govern real requests',
     get: (c) => c.probe.timeoutMs,
     set: (c, v) => { c.probe.timeoutMs = clamp(v, 1000, 300000, 15000); },

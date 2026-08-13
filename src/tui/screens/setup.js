@@ -233,7 +233,7 @@ function DoneStep({ summary, configFile }) {
         Text,
         null,
         h(Text, { dimColor: true }, "  next: "),
-        h(Text, { color: COLOR.accent }, "Target lists"),
+        h(Text, { color: COLOR.accent }, "Models lists"),
         h(Text, { dimColor: true }, " tests every model live, then "),
         h(Text, { color: COLOR.accent }, "Start the server"),
       ),
