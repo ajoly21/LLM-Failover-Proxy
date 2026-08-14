@@ -22,7 +22,7 @@ import { c, compact, ESC, ago, ms, percent, setLogLevel } from "./logger.js";
 import { resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
-import { rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
+import { describeSession, resetWarpIdentity, rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
 
 /* ------------------------------------------------------------------ *
  * Plain-text report, used by `status`, which must stay pipeable      *
@@ -491,6 +491,10 @@ function statsFromDisk(config) {
         model: entry?.model ?? null,
         alias: entry?.alias ?? null,
         via: typeof call.via === "string" ? call.via : null,
+        // Carried through here too, and not only by the server's own payload:
+        // both sources feed one renderer, so a field either arrives on both or
+        // silently disappears whenever the proxy happens not to be running.
+        escalated: call.escalated === true,
       };
     });
 
@@ -569,8 +573,16 @@ function printStats(stats) {
  * would let a `direct` row below be read as the ordinary state.
  */
 function warpLine(warp) {
-  const parts = [c.gray("outbound:"), warp.alive ? c.cyan("Cloudflare WARP") : c.red("Cloudflare WARP, tunnel down")];
-  if (warp.fallbackDirect) parts.push(c.gray("· falls back to direct"));
+  const parts = [c.gray("outbound:")];
+  // Under `on-rate-limit` the tunnel is in reserve, so a request going out
+  // directly is the expected state rather than a fault — and a down tunnel is
+  // something that will be noticed at the next 429, not right now.
+  if (warp.mode === "on-rate-limit") {
+    parts.push(c.gray("direct, and"), warp.alive ? c.cyan("Cloudflare WARP on a 429") : c.yellow("Cloudflare WARP on a 429, tunnel down"));
+  } else {
+    parts.push(warp.alive ? c.cyan("Cloudflare WARP") : c.red("Cloudflare WARP, tunnel down"));
+    if (warp.fallbackDirect) parts.push(c.gray("· falls back to direct"));
+  }
   return parts.join(" ");
 }
 
@@ -609,7 +621,11 @@ function printRecent(recent, limit = RECENT_ROWS) {
  * so it says so with a dash.
  */
 function viaCell(call) {
-  if (call.via === "warp") return c.cyan("warp");
+  // `warp 429` is the row worth being able to pick out: the model was rate-limited
+  // and the tunnel got round it. Under `mode: "on-rate-limit"` every warp row is
+  // one of these, and counting them is how you tell whether escalating buys
+  // anything on your providers or just spends a second request.
+  if (call.via === "warp") return c.cyan(call.escalated ? "warp 429" : "warp");
   if (call.via) return c.gray(call.via);
   return c.gray("-");
 }
@@ -648,13 +664,20 @@ export async function showStats(config, { json = false } = {}) {
  * `warp`: the outbound path, driven from a shell                       *
  * ------------------------------------------------------------------ */
 
-export const WARP_ACTIONS = ["status", "on", "off", "up", "down", "rotate"];
+export const WARP_ACTIONS = ["status", "on", "off", "always", "on-429", "up", "down", "rotate", "reset-identity"];
 
 /** The WARP block of a report, the same shape whoever asked for it. */
 function printWarp(report) {
   const field = (label, value) => say(`  ${c.gray(label.padEnd(9))} ${value}`);
 
-  field("routing", report.enabled ? c.green("through Cloudflare WARP") : c.gray("direct, from this machine"));
+  field(
+    "routing",
+    !report.enabled
+      ? c.gray("direct, from this machine")
+      : report.mode === "on-rate-limit"
+        ? c.green("direct, through Cloudflare WARP on a 429")
+        : c.green("through Cloudflare WARP"),
+  );
   if (!report.supported) {
     field("platform", c.yellow(report.unsupportedReason));
     return;
@@ -736,6 +759,29 @@ export async function warpCommand(config, args, { json = false } = {}) {
       return;
     }
 
+    /**
+     * What goes through the tunnel. Both turn WARP on, since choosing what to put
+     * through it and then finding it off would be the least useful outcome.
+     */
+    case "always":
+    case "on-429": {
+      const mode = action === "on-429" ? "on-rate-limit" : "always";
+      const already = config.warp.enabled && config.warp.mode === mode;
+      config.warp.enabled = true;
+      config.warp.mode = mode;
+      saveConfig(config);
+      const sync = await syncTunnel(config);
+      const ok = !["failed", "unsupported"].includes(sync.action);
+      await finish({
+        ok,
+        note:
+          (mode === "always" ? c.green("routing everything through WARP") : c.green("routing directly, through WARP on a 429")) +
+          (already ? c.gray(" (unchanged)") : ""),
+        extra: { changed: !already, mode },
+      });
+      return;
+    }
+
     case "up": {
       const result = await startTunnel(config);
       await finish({
@@ -768,13 +814,37 @@ export async function warpCommand(config, args, { json = false } = {}) {
 
     case "rotate": {
       const result = await rotate(config);
-      // What the new address is deliberately goes unsaid: WARP does not egress
-      // from a single one, so a figure printed here would be whatever address
-      // one probe happened to leave from, not the one the next request uses.
+      // The address *is* reported now. It is fixed for the life of a session, so
+      // the question has an answer — and since a restart lands back on the same
+      // address about three times in ten, the answer is worth having.
+      const note = result.ok
+        ? `${result.changed === true ? c.green("rotated") : c.yellow("restarted")} ${c.gray(describeSession(result))}`
+        : c.red(describeSession(result));
+      await finish({ ok: result.ok, note, extra: { changed: result.changed, before: result.before, after: result.after, tries: result.tries } });
+      // A rotation typed here cannot see what the serving proxy has in flight —
+      // it is another process. The proxy rotates on its own when the tunnel is
+      // idle; this is the override, so it says what the override costs.
+      if (!json && result.ok) {
+        say(`  ${c.gray("note")}      ${c.gray("requests going through the tunnel just now were cut — the proxy rotates by itself when it is idle")}`);
+        say("");
+      }
+      return;
+    }
+
+    case "reset-identity": {
+      const result = await resetWarpIdentity(config);
       await finish({
         ok: result.ok,
-        note: result.ok ? `${c.green("rotated")} ${c.gray("new WARP identity, the tunnel is back up")}` : c.red("rotation failed, the tunnel did not come back up"),
+        note: result.ok
+          ? `${c.green("re-registered")} ${c.gray("a new WARP device; the old token, licence key and private key are dead")}`
+          : c.red(`the tunnel did not come back up${result.detail ? `: ${result.detail}` : ""}`),
       });
+      // Nobody should reach for this expecting a new address, which is the reason
+      // it used to be what `rotate` did.
+      if (!json && result.ok) {
+        say(`  ${c.gray("note")}      ${c.gray("this is for credentials that leaked — to change the exit address, use `llmfp warp rotate`")}`);
+        say("");
+      }
       return;
     }
 

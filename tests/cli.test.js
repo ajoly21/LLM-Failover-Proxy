@@ -304,3 +304,44 @@ test("`stats` falls back to the persisted file when nothing is running", async (
     await mock.close();
   }
 });
+
+test("`stats` marks the rows that only got through because of WARP", async () => {
+  // Under `warp.mode: "on-rate-limit"` the tunnel carries nothing but rate-limited
+  // retries, so counting these rows is how you tell whether escalating buys
+  // anything on your providers or just spends a second request for nothing.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-proxy-via-"));
+  const configFile = path.join(dir, "config.json");
+  await fs.writeFile(
+    configFile,
+    JSON.stringify({
+      server: { host: "127.0.0.1", port: 1 }, // nothing listens: read from disk
+      warp: { enabled: true, mode: "on-rate-limit" },
+      providers: [{ id: "prov_1", name: "p", type: "openai", baseUrl: "http://127.0.0.1:1", apiKey: null, headers: {}, enabled: true }],
+      models: [{ id: "mdl_1", providerId: "prov_1", model: "m", alias: "m", kind: "chat", enabled: true, params: {} }],
+    }),
+  );
+  await fs.writeFile(
+    path.join(dir, "config.stats.json"),
+    JSON.stringify({
+      since: Date.now(),
+      updatedAt: Date.now(),
+      entries: { mdl_1: { requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30, lastUsedAt: Date.now() - 5_000 } },
+      recent: [
+        { id: "mdl_1", at: Date.now() - 5_000, ttftMs: 400, via: "warp", escalated: true },
+        { id: "mdl_1", at: Date.now() - 65_000, ttftMs: 500, via: "warp", escalated: false },
+        { id: "mdl_1", at: Date.now() - 125_000, ttftMs: 600, via: "direct" },
+      ],
+    }),
+  );
+
+  try {
+    const { stdout } = await cli(["stats"], { configFile, cwd: dir });
+    // The 429 that the tunnel got round, told apart from a request that was going
+    // through it anyway — the two mean completely different things.
+    assert.match(stdout, /5s ago\s+p\/m\s+400ms\s+warp 429/);
+    assert.match(stdout, /1min ago\s+p\/m\s+500ms\s+warp\b/);
+    assert.match(stdout, /2min ago\s+p\/m\s+600ms\s+direct/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

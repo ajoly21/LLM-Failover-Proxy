@@ -1027,22 +1027,24 @@ test('the status screen shows the failover order and live counters', async () =>
 });
 
 test('the last answered requests are listed under the counters, with their age', async () => {
-  const now = Date.now();
-  const stats = {
+  // Ages are computed when the screen asks, not once at the top. "4s ago" sits on
+  // a rounding boundary and this test mounts twice, so the second render happens a
+  // beat later and read "5s ago" — a real fragility in the test, not a slow machine.
+  const stats = () => ({
     uptimeSec: 300,
     statsSince: Date.UTC(2026, 7, 11, 8, 0),
     totals: { requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30 },
-    chain: [{ id: 'mdl_llama', priority: 1, provider: 'groq', model: 'llama', requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30, lastUsedAt: now - 4000 }],
+    chain: [{ id: 'mdl_llama', priority: 1, provider: 'groq', model: 'llama', requests: 3, successes: 3, failures: 0, cancelled: 0, tokens: 30, lastUsedAt: Date.now() - 4000 }],
     recent: [
-      { id: 'mdl_llama', at: now - 4000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 437 },
-      { id: 'mdl_llama', at: now - 90_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 8200 },
-      { id: 'mdl_llama', at: now - 7_200_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: null },
+      { id: 'mdl_llama', at: Date.now() - 4000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 437 },
+      { id: 'mdl_llama', at: Date.now() - 90_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 8200 },
+      { id: 'mdl_llama', at: Date.now() - 7_200_000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: null },
     ],
-  };
+  });
   const app = await mount({
     providers: [provider('groq')],
     models: [model('llama', 'groq')],
-    view: { name: 'status', fetchStats: async () => stats },
+    view: { name: 'status', fetchStats: async () => stats() },
   });
   try {
     const frame = app.frame();
@@ -1062,7 +1064,7 @@ test('the last answered requests are listed under the counters, with their age',
   const narrow = await mount({
     providers: [provider('groq')],
     models: [model('llama', 'groq')],
-    view: { name: 'status', fetchStats: async () => stats },
+    view: { name: 'status', fetchStats: async () => stats() },
     columns: 32,
     rows: 30,
   });
@@ -1355,4 +1357,71 @@ test('a wide terminal shows every column, and more rows', async () => {
   } finally {
     await app.close();
   }
+});
+
+test('the status screen tells a WARP retry apart from a request that was going through it anyway', async () => {
+  // Two rows both reading `warp` would hide the only thing worth knowing under
+  // `mode: "on-rate-limit"`: which answers exist because the tunnel got round a
+  // rate limit, and which were simply going that way already.
+  const now = Date.now();
+  const stats = {
+    uptimeSec: 300,
+    statsSince: now - 600_000,
+    totals: { requests: 2, successes: 2, failures: 0, cancelled: 0, tokens: 20 },
+    warp: { enabled: true, mode: 'on-rate-limit', alive: true, httpPort: 25345, socksPort: 25344, fallbackDirect: false },
+    chain: [{ id: 'mdl_llama', priority: 1, provider: 'groq', model: 'llama', requests: 2, successes: 2, failures: 0, cancelled: 0, tokens: 20, lastUsedAt: now - 4000 }],
+    recent: [
+      { id: 'mdl_llama', at: now - 4000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 437, via: 'warp', escalated: true },
+      { id: 'mdl_llama', at: now - 9000, provider: 'groq', model: 'llama', alias: 'llama', ttftMs: 512, via: 'warp', escalated: false },
+    ],
+  };
+  const app = await mount({
+    providers: [provider('groq')],
+    models: [model('llama', 'groq')],
+    view: { name: 'status', fetchStats: async () => stats },
+  });
+  try {
+    const frame = app.frame();
+    assert.match(frame, /warp 429/, 'the rate-limited retry is marked');
+    // And the outbound line reads the mode: under `on-rate-limit` a `direct` row
+    // is the ordinary state, not a leak, so it must not be dressed as a fault.
+    assert.match(frame, /Cloudflare WARP on a 429/);
+  } finally {
+    await app.close();
+  }
+});
+
+test('the outbound setting has a third answer: nothing through the tunnel at all', async () => {
+  // One setting with three answers rather than an on/off beside a what-through:
+  // that pair could be left reading "route through WARP: yes · what goes through
+  // it: nothing", and a screen able to express a contradiction eventually will.
+  const setting = SETTINGS.find((entry) => entry.label === 'what goes through WARP');
+  assert.ok(setting, 'the setting is still there under its own name');
+  assert.deepEqual(setting.options, ['nothing', 'only 429s', 'everything']);
+
+  const config = { warp: { enabled: false, mode: 'always' } };
+  assert.equal(setting.get(config), 'nothing', 'WARP off reads as nothing going through it');
+
+  setting.set(config, 'only 429s');
+  assert.equal(config.warp.enabled, true);
+  assert.equal(config.warp.mode, 'on-rate-limit');
+  assert.equal(setting.get(config), 'only 429s');
+
+  // Turning it off must not forget which of the two it was: coming back should
+  // restore the choice that was made, not a default.
+  setting.set(config, 'nothing');
+  assert.equal(config.warp.enabled, false);
+  assert.equal(config.warp.mode, 'on-rate-limit', 'the mode is remembered while nothing goes through');
+  assert.equal(setting.get(config), 'nothing');
+
+  setting.set(config, 'everything');
+  assert.equal(config.warp.enabled, true);
+  assert.equal(config.warp.mode, 'always');
+
+  // And there is no second switch left that could disagree with this one.
+  assert.equal(
+    SETTINGS.filter((entry) => entry.section === 'outbound' && /route through/i.test(entry.label)).length,
+    0,
+    'the old on/off is gone, not left beside it',
+  );
 });

@@ -58,8 +58,17 @@ export const DEFAULTS = {
   // which is what every version before this one did and still the default: an
   // upgrade changes nothing until somebody turns this on.
   warp: {
-    // Route every provider request through Cloudflare WARP instead.
+    // Reach the providers through Cloudflare WARP rather than from this machine.
     enabled: false,
+    // What actually goes through the tunnel once it is on.
+    //   "always"        — every provider request, which is what `enabled` has
+    //                     meant since the feature existed, and so the default.
+    //   "on-rate-limit" — requests leave directly, and a model the provider
+    //                     answered 429 to is retried through the tunnel. Per
+    //                     model and per attempt: one model escalating never
+    //                     moves another, and the models racing beside it in the
+    //                     same request keep going out directly.
+    mode: "always",
     // Local proxies the tunnel exposes. High and out of the way, like the
     // proxy's own port; the SOCKS one is there for whatever else you point at it.
     socksPort: 25344,
@@ -71,6 +80,20 @@ export const DEFAULTS = {
     // `true` sends it from this machine's own address instead — which is the
     // address WARP was turned on to hide, so it is never the default.
     fallbackDirect: false,
+    // Getting a new exit address. Cloudflare picks one when a tunnel session is
+    // established, so a restart is what draws again — the identity has nothing to
+    // do with it. Only ever done while nothing is going through the tunnel.
+    rotate: {
+      // Start a new session once the current one is this old. 0 = only when a
+      // provider rate-limits the address we are leaving from.
+      everyMs: 0,
+      // Never twice inside this, whatever asks. Each one re-establishes a session
+      // with Cloudflare, and thrashing that would be rude and no more effective.
+      minIntervalMs: 600000,
+      // Restarts spent trying to actually land somewhere else. Measured at one
+      // colo, about three sessions in ten come back on the address they left.
+      attempts: 3,
+    },
   },
   probe: {
     // Deadline for one model or provider test from the terminal UI. Separate
@@ -234,14 +257,36 @@ function normalizeWarp(warp) {
   if (socksPort === httpPort) [socksPort, httpPort] = [base.socksPort, base.httpPort];
 
   const endpoint = String(warp?.endpoint ?? "").trim();
+  // A rotation costs a tunnel restart, so these bound how often that can be asked
+  // for. The floor on `minIntervalMs` is the one that matters: it is what stands
+  // between a hand-edited `0` and a tunnel restarting on every check.
+  const base_rotate = base.rotate;
+  const asked = warp?.rotate;
+  const span = (value, fallback, min, max) => {
+    const number = Math.trunc(Number(value));
+    return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+  };
+  const rotate = {
+    // 0 is meaningful — "only when a 429 says so" — so it is allowed through, and
+    // anything else is pulled up to a minute.
+    everyMs: Number(asked?.everyMs) === 0 ? 0 : span(asked?.everyMs, base_rotate.everyMs, 60000, 86400000),
+    minIntervalMs: span(asked?.minIntervalMs, base_rotate.minIntervalMs, 60000, 86400000),
+    attempts: span(asked?.attempts, base_rotate.attempts, 1, 10),
+  };
+
   return {
     enabled: warp?.enabled === true,
+    // An unknown mode falls back to the one `enabled` has always meant, never to
+    // the newer behaviour: a typo must not quietly stop routing traffic through
+    // the tunnel somebody turned on.
+    mode: warp?.mode === "on-rate-limit" ? "on-rate-limit" : base.mode,
     socksPort,
     httpPort,
     // `host:port` only: this ends up in a generated config file, so anything that
     // could be read as a second setting is refused rather than escaped.
     endpoint: /^[A-Za-z0-9._-]+:\d{1,5}$/.test(endpoint) ? endpoint : base.endpoint,
     fallbackDirect: warp?.fallbackDirect === true,
+    rotate,
   };
 }
 

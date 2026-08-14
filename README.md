@@ -395,11 +395,22 @@ By default, nothing here changes: a request leaves from this machine's own addre
 llmfp warp              where requests go out from right now
 llmfp warp on           route them through Cloudflare WARP
 llmfp warp off          back to going straight out
-llmfp warp rotate       throw the WARP identity away and get a new one
+llmfp warp on-429       go out directly, and retry a rate-limited model through WARP
+llmfp warp always       put every request through it (what `on` gives you)
+llmfp warp rotate       new tunnel session, hence probably a new exit address
+llmfp warp reset-identity   throw the WARP device registration away (for a leak)
 llmfp warp up / down    start or stop the tunnel without changing the routing
 ```
 
-Or flip it in the UI, under `3. Settings` → _How it reaches the providers_. Either way a proxy that is already running picks the change up within a second or two — there is nothing to restart.
+Or set it in the UI, under `3. Settings` → _How it reaches the providers_ → **what goes through WARP**, which has the three answers this whole section is about:
+
+| Answer | What happens |
+| ------ | ------------ |
+| `nothing` | requests go straight out, no tunnel runs, nothing is retried through one |
+| `only 429s` | requests go straight out, and a model the provider rate-limited is retried through the tunnel |
+| `everything` | every provider request leaves through the tunnel |
+
+Either way a proxy that is already running picks the change up within a second or two — there is nothing to restart.
 
 ### Turning it on
 
@@ -421,6 +432,30 @@ Both are pinned to a version and verified against the SHA-256 list published bes
 
 The one requirement is **outbound UDP to port 2408**. That is what a restrictive corporate network tends to block, and it is the usual reason the tunnel does not come up.
 
+### Keeping the tunnel in reserve, for the models that need it
+
+Routing everything through WARP costs a hop on every request, including the ones nobody is rate-limiting. Set `warp.mode` to `on-rate-limit` (_what goes through WARP_ → `only 429s` in Settings) and the tunnel is held back for the case it actually solves:
+
+```
+    chain: openrouter/kimi-k2 → groq/llama-3.3 → deepseek/chat
+                    ↓
+    1. openrouter/kimi-k2 leaves directly            → HTTP 429
+    2. openrouter/kimi-k2 asked again, through WARP   → answers
+```
+
+The model that was throttled is retried **as itself**, from another address, before the chain gives up on it and falls to the next model. Which is the point: falling over to a weaker model costs you the answer you asked for, and a rate limit by address is the one failure where the same request from somewhere else plausibly succeeds.
+
+**It is decided per model and per attempt.** Several models are routinely in flight at once here — the chain hedges — and one of them escalating does not touch the others: they keep going out directly, they are not cut, and the first usable answer still wins whichever way it arrived. A model going through the tunnel is one model's decision, never the request's.
+
+The 429 is also **remembered**, for as long as the provider's `Retry-After` asked (a short window otherwise). The next request for that model starts on the tunnel rather than spending another 429 to rediscover the same quota — and when the window passes it tries directly again, because quotas refill. A model inside its window is *not* benched: it stays exactly where it is in the chain and merely leaves by a different door.
+
+Two things stay deliberately out of this:
+
+- **Only a `429` escalates.** A 5xx, a rejected parameter or a bad key would fail identically from any address, and retrying would only spend the tokens twice. `403` is the tempting case — "not available in your country" is exactly what a tunnel fixes — but an invalid key is also a `403`, and the status does not say which, so it is left alone.
+- **A stream that has already started is never replayed.** Once bytes have reached the client, sending the request again from another address would splice two different answers together. In practice a `429` always arrives before the first byte, so this costs nothing.
+
+If the tunnel cannot be had when a 429 arrives, the rate limit simply stands and is reported — the request is never handed to a port with nothing behind it. Both modes start the tunnel when the proxy starts, so the first rate-limited attempt does not wait for one to come up; an idle wireproxy with nothing going through it is one dormant process.
+
 ### Which way each request left
 
 `llmfp stats` and the UI's _Status & stats_ screen gain a `VIA` column: for each of the last answered requests, whether it went through the tunnel or straight out.
@@ -433,22 +468,63 @@ The one requirement is **outbound UDP to port 2408**. That is what a restrictive
   6min ago openrouter/liquid/lfm-2.5    2.10s  direct
 ```
 
-`direct` means that one left from this machine. A row like the third one, while WARP is on, is worth noticing: it is a request that went around the tunnel.
+`direct` means that one left from this machine. A row like the third one, while WARP is on in `always` mode, is worth noticing: it is a request that went around the tunnel. Under `on-rate-limit` the reading is the other way round — `direct` is the ordinary state, and a `warp` row is a model that hit its quota and got round it.
 
-This is recorded from the outbound decision itself — the proxy knows which connection it dialled — so it costs nothing and asks nobody. **No address is reported**, deliberately: WARP does not egress from a single one, so any IP shown here would be whatever address one probe happened to leave from and not the one your next request will use. The question worth answering is "WARP or straight out", and that is the one answered.
+This is recorded from the outbound decision itself — the proxy knows which connection it dialled — so it costs nothing and asks nobody. No address appears in this column, because it would be the same address on every row: see below for why, and for the one place an address *is* reported.
 
-### Rotating the WARP identity
+### Changing the exit address
 
-This is what the feature is for. When a provider is rate-limiting you by address:
+**A new tunnel session is what moves your address. A new identity does nothing.** That is not what you would guess from the names, so here are the measurements, taken on one machine at one Cloudflare colo:
+
+| Action | Sample | Exit address changed |
+| ------ | ------ | -------------------- |
+| Nothing — just send more requests | 10 | **0 / 10** |
+| Restart the tunnel, same identity | 10 | **7 / 10** |
+| Re-register the WARP device | 2 | **0 / 2** |
+
+Cloudflare picks which address a WARP session egresses from when the session is **established**, at whichever colo your UDP handshake lands on — and the colo follows anycast routing from your own network, which a new identity does not change. So the address is fixed for the life of a session, drawn again by the next one, and the device registration is beside the point.
+
+Two things follow. Sending more requests will never get you a different address, however many you send. And `llmfp warp rotate` restarts the session and leaves the identity alone:
 
 ```
 $ llmfp warp rotate
-  rotated new WARP identity, the tunnel is back up
+  rotated    now leaving from 104.28.243.187 (was 104.28.211.192)
 ```
 
-The WARP device registration is thrown away and a new one made, which takes about three seconds. It is deliberately never automatic and never interactive, so a script or a cron job decides when: requests in flight through the tunnel fail while it is down, and only you know when that is acceptable.
+Because roughly three restarts in ten come back on the address they left, this **checks** rather than assumes: one request to Cloudflare's own `/cdn-cgi/trace` before and after, and up to `warp.rotate.attempts` restarts spent trying to actually land somewhere else. `--json` carries `changed`, `before` and `after`; `changed` is `true`, `false`, or `null` when the address could not be confirmed — which is not the same as a change, and is not reported as one.
 
-`warp rotate --json` reports `ok`, which is what a script tests: the identity was replaced and the tunnel came back up. Whether the address the providers see actually moved is not something this tool can honestly claim — the range is shared and the egress address is not fixed — so it does not claim it.
+The pool at a given colo is small — five distinct addresses across eleven samples above — so `changed: false` is an ordinary outcome and not a fault.
+
+### Doing it without cutting anything
+
+A restart kills the wireproxy process, and that closes its sockets whatever the connection pool does. So the proxy rotates **only when nothing is going through the tunnel**:
+
+```
+warp: new tunnel session (the provider rate-limited this address) — now leaving from 104.28.243.190 (was 104.28.211.192)
+```
+
+The gate is the tunnel being unused, not the proxy being idle — and under `mode: "on-rate-limit"` those are very different. The tunnel there carries only the attempts that were rate-limited, so it sits unused almost all the time even while the proxy is busy, and a window is never hard to find. Nothing is ever forced: a tunnel that stays busy is simply not rotated.
+
+What asks for a rotation, by default, is **a `429` that came back through the tunnel** — the exit address itself being throttled, which no other model and no cooldown can fix. A clock rotates when nothing needed it and sits still when something does, so the clock is optional (`warp.rotate.everyMs`) and off by default.
+
+| Key                          | Default  | What it does                                                                                         |
+| ---------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `warp.rotate.everyMs`        | `0`      | also get a new session once the current one is this old. `0` = only when the address is rate-limited  |
+| `warp.rotate.minIntervalMs`  | `600000` | never twice inside this, whatever asks                                                               |
+| `warp.rotate.attempts`       | `3`      | restarts to spend trying to actually land on a different address                                      |
+
+`llmfp warp rotate` typed in a terminal is the override, and it is honest about the cost: it runs in its own process, so it cannot see what the serving proxy has in flight, and it says so.
+
+### Retiring an identity that leaked
+
+The identity — device id, access token, licence key, private key, all in `warp/wgcf-account.toml` — has its own command, because it is its own problem:
+
+```
+$ llmfp warp reset-identity
+  re-registered  a new WARP device; the old token, licence key and private key are dead
+```
+
+Use it if that file has been exposed. Do **not** reach for it to change your address; `warp rotate` is what does that.
 
 ### When the tunnel is not there
 
@@ -593,7 +669,8 @@ Off means straight out from this machine, which is what every version before thi
 
 | Key                   | Default              | What it does                                                                                                        |
 | --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `warp.enabled`        | `false`              | route provider requests through a Cloudflare WARP tunnel instead of sending them from this machine                  |
+| `warp.enabled`        | `false`              | reach the providers through a Cloudflare WARP tunnel instead of from this machine                                    |
+| `warp.mode`           | `always`             | what goes through it: `always` every request, `on-rate-limit` only a model the provider answered `429` to            |
 | `warp.fallbackDirect` | `false`              | WARP is on but its tunnel is not answering: `false` fails the request, `true` sends it from this machine's address   |
 | `warp.socksPort`      | `25344`              | the SOCKS5 proxy the tunnel exposes, for whatever else you want to point at it                                      |
 | `warp.httpPort`       | `25345`              | the HTTP proxy this proxy's own outbound requests go through                                                        |
@@ -684,9 +761,13 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 
 **A provider needs a special header, or a fixed `max_tokens`.** Both are supported per provider and per model in `config.json` (`headers`, `params`).
 
-**The WARP tunnel does not come up.** `llmfp warp status` says what it found and prints the end of `wireproxy.log` when something failed. Two causes cover almost all of it: **outbound UDP to port 2408 is blocked**, which a corporate network or a locked-down VPS often does — the tunnel then handshakes and carries nothing — or the local port is already taken, which `warp status` reports as such rather than using it. `llmfp warp down && llmfp warp up` re-reads everything; `llmfp warp rotate` also re-registers the identity from scratch.
+**I rotated and the address did not change.** Expected about three times in ten: the pool at a colo is small, and `warp rotate` already spends up to `warp.rotate.attempts` restarts trying. It reports `changed: false` rather than pretending. Re-registering the device (`reset-identity`) will not help — the identity has no bearing on the address.
 
-**Requests fail with `warp_unavailable`.** WARP is on and its tunnel is not answering, and failing is the deliberate default — sending the request anyway would reveal the address WARP was turned on to hide. Bring the tunnel up, turn WARP off, or set `warp.fallbackDirect` if you would rather it went out directly.
+**The WARP tunnel does not come up.** `llmfp warp status` says what it found and prints the end of `wireproxy.log` when something failed. Two causes cover almost all of it: **outbound UDP to port 2408 is blocked**, which a corporate network or a locked-down VPS often does — the tunnel then handshakes and carries nothing — or the local port is already taken, which `warp status` reports as such rather than using it. `llmfp warp down && llmfp warp up` re-reads everything; `llmfp warp reset-identity` also re-registers the device from scratch, which is worth trying if the profile itself looks wrong.
+
+**Requests fail with `warp_unavailable`.** WARP is on in `always` mode and its tunnel is not answering, and failing is the deliberate default — sending the request anyway would reveal the address WARP was turned on to hide. Bring the tunnel up, turn WARP off, or set `warp.fallbackDirect` if you would rather it went out directly. `warp.mode: "on-rate-limit"` never produces this: the tunnel is a second chance there, so a request that cannot have it is answered by whatever the direct route said.
+
+**A model keeps being rate-limited even through WARP.** The failure report says so in as many words (`retried through Cloudflare WARP, same answer`), and it is worth reading as the answer it is: the quota is on the account or the key, not on this machine's address, so no amount of rotating will move it. `llmfp warp rotate` is for the other case.
 
 ## For developers
 

@@ -11,7 +11,7 @@ import { findAvailablePort } from "./net.js";
 import { failureFrames, listModels, run } from "./router.js";
 import { createGoneSignal } from "./signal.js";
 import { statsFile as currentStatsFile, enableStatsPersistence, recentCalls, snapshot, stateFor, statsSince } from "./state.js";
-import { syncTunnel, warpEnabled, warpSummary } from "./warp/index.js";
+import { startRotationSchedule, syncTunnel, warpEnabled, warpSummary } from "./warp/index.js";
 
 const MAX_BODY = 32 * 1024 * 1024;
 
@@ -143,6 +143,8 @@ function createSink(res, config) {
         "x-llm-proxy-attempt": String(meta.attempt),
         // Speculative attempts still running when this one won the race.
         "x-llm-proxy-racing": String(Math.max(0, meta.racing ?? 0)),
+        "x-llm-proxy-via": meta.via ?? "direct",
+        ...(meta.escalated ? { "x-llm-proxy-escalated": "true" } : {}),
       });
       if (typeof res.flushHeaders === "function") res.flushHeaders();
     },
@@ -164,7 +166,7 @@ function createSink(res, config) {
 
 /** The last answered requests, named: ids mean nothing to a reader. */
 function recentPayload(config) {
-  return recentCalls().map(({ id, at, ttftMs, via }) => {
+  return recentCalls().map(({ id, at, ttftMs, via, escalated }) => {
     const entry = config.models.find((model) => model.id === id);
     return {
       id,
@@ -177,6 +179,8 @@ function recentPayload(config) {
       // against an older proxy sees it missing and says so, rather than
       // misreading another field.
       via: via ?? null,
+      // And whether that was the plan or the way round a rate limit.
+      escalated: Boolean(escalated),
     };
   });
 }
@@ -382,6 +386,10 @@ export function createServer({ configFile, statsFile } = {}) {
             "x-llm-proxy-model": result.entry.model,
             "x-llm-proxy-fallbacks": String(result.attempts.length),
             "x-llm-proxy-cancelled": String(result.cancelled ?? 0),
+            // Which way this answer came in. `escalated` is the interesting half:
+            // it says the model was rate-limited and the tunnel got round it.
+            "x-llm-proxy-via": result.via ?? "direct",
+            ...(result.escalated ? { "x-llm-proxy-escalated": "true" } : {}),
           });
           return;
         }
@@ -549,6 +557,13 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   // install spends a minute downloading the tunnel. Never fatal either — WARP
   // failing to come up is reported, it does not stop the proxy from serving.
   if (warpEnabled(config)) await syncTunnel(config);
+
+  // Watches for a moment with nothing going through the tunnel to draw a new exit
+  // address in. Started unconditionally and cheap when off: it reads the live
+  // config on each tick, so turning WARP on from the Settings screen is picked up
+  // without a restart, exactly like the tunnel itself.
+  const rotation = startRotationSchedule(() => app.config);
+  app.server.once("close", rotation.stop);
 
   // Spreading `app` would copy the value of its `config` getter once and freeze
   // it, so a caller reading `app.config` after a hot reload would get the old

@@ -234,21 +234,44 @@ export async function stopTunnel(config, { timeoutMs = STOP_TIMEOUT_MS } = {}) {
 }
 
 /**
- * Forces a new exit address: throws the WARP device registration away and comes
- * back with a fresh one.
+ * A new tunnel session, on the same identity.
  *
- * This is the whole point of the feature for anyone rate-limited by IP, and it
- * is deliberately a plain command with no prompt, so a script or a cron job can
- * call it. The tunnel goes down for the couple of seconds a registration takes,
- * and requests in flight through it fail — the caller decides when that is
- * acceptable, which is why it never happens on its own.
+ * This, and not a new identity, is what moves the exit address. Cloudflare picks
+ * which address a WARP session egresses from when the session is established, at
+ * whichever colo the UDP handshake lands on — so the address is fixed for the
+ * life of the session and drawn again by the next one. Measured on one machine:
+ * ten requests through one session gave one address ten times, ten restarts on
+ * the *same* identity moved it seven times out of ten, and two full
+ * re-registrations moved it not at all.
+ *
+ * So the identity is left alone. `resetIdentity` exists for the case that is
+ * genuinely about the identity — credentials that leaked — and costs a device
+ * registration with Cloudflare, which this does not.
+ *
+ * The tunnel is down for about a second, and requests in flight through it fail
+ * with it: killing the process closes its sockets whatever the socket pool does.
+ * Callers pick the moment; `rotate.js` picks one where nothing is using it.
  */
-export async function rotateTunnel(config, { timeoutMs = START_TIMEOUT_MS } = {}) {
+export async function restartTunnel(config, { timeoutMs = START_TIMEOUT_MS } = {}) {
+  await stopTunnel(config);
+  writeState(config.__file, { rotatedAt: new Date().toISOString() });
+  return startTunnel(config, { timeoutMs });
+}
+
+/**
+ * Throws the WARP device registration away and comes back with a fresh one.
+ *
+ * Not a way to change the exit address — see `restartTunnel`, which is. What this
+ * is for is an identity that must not be used again: the account file holds an
+ * access token, a licence key and a private key, and if those have leaked this is
+ * what invalidates them.
+ */
+export async function resetIdentity(config, { timeoutMs = START_TIMEOUT_MS } = {}) {
   await stopTunnel(config);
   // Registering needs the executables, and asking for a new identity before they
-  // exist would fail for a reason that has nothing to do with rotating.
+  // exist would fail for a reason that has nothing to do with the identity.
   await ensureBinaries(config.__file);
   await ensureIdentity(config.__file, { force: true });
-  writeState(config.__file, { rotatedAt: new Date().toISOString() });
+  writeState(config.__file, { identityResetAt: new Date().toISOString(), rotatedAt: new Date().toISOString() });
   return startTunnel(config, { timeoutMs });
 }

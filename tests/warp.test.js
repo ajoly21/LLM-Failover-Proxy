@@ -11,9 +11,13 @@ import { extractFromTarGz, untar } from '../src/warp/archive.js';
 import { digestFor, parseProfile, writeTunnelConfig } from '../src/warp/binaries.js';
 import { detect, downloads, supported, UnsupportedPlatformError, WGCF_VERSION, WIREPROXY_VERSION } from '../src/warp/platform.js';
 import { warpPaths } from '../src/warp/paths.js';
-import { isLocalTarget, proxiedFetch, ProxyUnreachableError, resetTunnels } from '../src/outbound.js';
+import { isLocalTarget, proxiedFetch, ProxyUnreachableError, retireTunnels } from '../src/outbound.js';
+import { warpMode } from '../src/warp/mode.js';
+import { warpSummary } from '../src/warp/index.js';
+import { worthEscalating } from '../src/warp/egress.js';
+import { AttemptError, REASONS } from '../src/errors.js';
 import { DEFAULTS, loadConfig, saveConfig, statsPathFor } from '../src/config.js';
-import { flushStats } from '../src/state.js';
+import { flushStats, markRateLimited, preferredVia, resetAll, stateFor } from '../src/state.js';
 import { assemble, backend, postJson, startProxy } from './helpers.js';
 import { startMock } from './mock-provider.js';
 
@@ -215,6 +219,57 @@ test('a configuration written before WARP existed loads with the feature off', a
     // And saving it back does not lose the block, so the next load is identical.
     saveConfig(config, file);
     assert.deepEqual(loadConfig(file).warp, DEFAULTS.warp);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unknown mode falls back to routing everything, never to the newer behaviour', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-warp-cfg-'));
+  try {
+    const file = path.join(dir, 'config.json');
+    const load = async (mode) => {
+      await fs.writeFile(file, JSON.stringify({ providers: [], models: [], warp: { enabled: true, mode } }));
+      return loadConfig(file);
+    };
+
+    assert.equal((await load('on-rate-limit')).warp.mode, 'on-rate-limit');
+    assert.equal((await load('always')).warp.mode, 'always');
+    // A typo must not quietly stop routing traffic through a tunnel somebody
+    // turned on: the safe reading of an unknown value is the stricter one.
+    for (const mode of ['on-ratelimit', 'ON-RATE-LIMIT', 'sometimes', '', null, 42, true]) {
+      assert.equal((await load(mode)).warp.mode, 'always', `mode: ${JSON.stringify(mode)}`);
+    }
+
+    // And the mode means nothing at all until WARP itself is on.
+    await fs.writeFile(file, JSON.stringify({ providers: [], models: [], warp: { enabled: false, mode: 'on-rate-limit' } }));
+    assert.equal(warpMode(loadConfig(file)), 'off');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the summary describes a WARP that is on, mode included', async () => {
+  // `/stats`, `status` and the Status screen all read this, and every one of them
+  // reads it with WARP *on* — which is the branch a test asserting the default
+  // never reaches, and the branch where getting it wrong takes the screen down.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-warp-sum-'));
+  try {
+    const file = path.join(dir, 'config.json');
+    await fs.writeFile(file, JSON.stringify({ providers: [], models: [], warp: { enabled: true, mode: 'on-rate-limit', fallbackDirect: true } }));
+
+    const summary = warpSummary(loadConfig(file));
+    assert.equal(summary.enabled, true);
+    assert.equal(summary.mode, 'on-rate-limit', 'without this a reader cannot tell what a `via` of direct means');
+    assert.equal(summary.httpPort, DEFAULTS.warp.httpPort);
+    assert.equal(summary.fallbackDirect, true);
+    // No tunnel has ever run against this config, and saying so must not require
+    // asking the network: the Status screen polls this every couple of seconds.
+    assert.equal(summary.alive, false);
+    assert.equal(summary.pid, null);
+
+    await fs.writeFile(file, JSON.stringify({ providers: [], models: [], warp: { enabled: true } }));
+    assert.equal(warpSummary(loadConfig(file)).mode, 'always', 'a file with no mode reads as the behaviour it always had');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -450,7 +505,7 @@ test('an https target is tunnelled with CONNECT, and a refusal is not mistaken f
     });
     assert.equal(lines[0], 'CONNECT api.provider.example:443 HTTP/1.1', 'the port is implied by the scheme');
   } finally {
-    resetTunnels();
+    retireTunnels();
     proxy.close();
     await new Promise((resolve) => proxy.close(resolve));
   }
@@ -520,5 +575,92 @@ test('a proxy that is not listening at all is reported as unreachable', async ()
     assert.ok(err instanceof ProxyUnreachableError);
     return true;
   });
-  resetTunnels();
+  retireTunnels();
+});
+
+/* ------------------------------------------------------------------ *
+ * Retiring a tunnel without cutting what is going through it          *
+ * ------------------------------------------------------------------ */
+
+test('replacing the tunnel lets the answers already travelling through it arrive', async () => {
+  // `agent.destroy()` is the obvious way to drop a socket pool and it walks the
+  // busy sockets too, so rotating the identity — or saving any WARP setting from
+  // the Settings screen — used to cut every answer in flight. Which is exactly
+  // what one model must never be able to do to another.
+  const stub = await stubProxy(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"still":');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    res.end('"here"}');
+  });
+  try {
+    const pending = proxiedFetch(stub.url)('http://provider.example/v1/chat', { method: 'POST', body: '{}' });
+    const response = await pending;
+    // Mid-body: the headers have arrived, the rest has not.
+    const reading = response.json();
+    retireTunnels();
+    assert.deepEqual(await reading, { still: 'here' }, 'the body finished arriving after the pool was retired');
+  } finally {
+    await stub.close();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * What earns a second chance                                          *
+ * ------------------------------------------------------------------ */
+
+test('a rate limit is the only failure worth sending from somewhere else', () => {
+  assert.equal(worthEscalating(new AttemptError(REASONS.RATE_LIMIT, 'HTTP 429')), true);
+  // Every other failure would fail again from any address, and a retry would
+  // only spend the tokens twice. A 403 is the tempting one and stays out: "not
+  // available in your country" is exactly this, an invalid key is not, and the
+  // status does not say which of the two it is.
+  for (const reason of [REASONS.AUTH, REASONS.UPSTREAM, REASONS.TIMEOUT, REASONS.NETWORK, REASONS.EMPTY, REASONS.MALFORMED, REASONS.CONTENT_FILTER]) {
+    assert.equal(worthEscalating(new AttemptError(reason, 'nope')), false, reason);
+  }
+  assert.equal(worthEscalating(null), false);
+  assert.equal(worthEscalating({}), false);
+});
+
+/* ------------------------------------------------------------------ *
+ * Remembering which way an entry should leave                         *
+ * ------------------------------------------------------------------ */
+
+test('a rate-limited entry is remembered, so the next request does not spend a 429 to relearn it', () => {
+  resetAll();
+  const id = 'mdl_sticky';
+  assert.equal(preferredVia(id), 'direct', 'nothing is known about a fresh entry');
+
+  // What the provider asked for is what is waited out.
+  markRateLimited(id, { retryAfterMs: 60000, cooldown: { baseMs: 15000, maxMs: 300000 } });
+  assert.equal(preferredVia(id), 'warp');
+  assert.equal(stateFor(id).escalated, 1);
+  // And it is a preference, not a cooldown: the entry is fully in play, it just
+  // leaves by a different door. Benching it here would drop it down the chain.
+  assert.equal(stateFor(id).cooldownUntil, 0, 'the chain order is untouched');
+
+  // The window always ends: a quota refills, and an entry left on the tunnel for
+  // the rest of the process because of one 429 an hour ago is a bug, not caution.
+  assert.equal(preferredVia(id, Date.now() + 61000), 'direct');
+  // Capped, so an absurd `Retry-After` cannot pin an entry there either.
+  markRateLimited(id, { retryAfterMs: 999999999, cooldown: { baseMs: 15000, maxMs: 300000 } });
+  assert.ok(stateFor(id).warpUntil - Date.now() <= 300000);
+});
+
+test('the direct route working again is what closes the window', async () => {
+  const mock = await startMock('ok', { name: 'reopened' });
+  const proxy = await startProxy(assemble([backend(mock, { id: 'reopened', model: 'm', alias: 'a' })]));
+  try {
+    const id = 'mdl_reopened';
+    markRateLimited(id, { retryAfterMs: 300000, cooldown: { baseMs: 15000, maxMs: 300000 } });
+    assert.equal(preferredVia(id), 'warp');
+
+    await postJson(`${proxy.url}/v1/chat/completions`, { messages: [{ role: 'user', content: 'hi' }] });
+    // It answered directly, so whatever quota had closed that route has reopened.
+    // Nothing else could tell us; the window would otherwise run its full length.
+    assert.equal(preferredVia(id), 'direct');
+  } finally {
+    await proxy.close();
+    await mock.close();
+  }
 });

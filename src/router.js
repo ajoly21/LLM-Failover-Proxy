@@ -4,8 +4,8 @@ import { getProvider, resolveSecret } from "./config.js";
 import { AttemptError, classifyStatus, ClientGoneError, parseRetryAfter, REASONS } from "./errors.js";
 import { c, compact, log, ms } from "./logger.js";
 import { createSseParser, SSE_DONE } from "./sse.js";
-import { cooldownRemaining, isCoolingDown, recordCancelled, recordFailure, recordStart, recordSuccess } from "./state.js";
-import { fetchVia, outboundPath } from "./warp/index.js";
+import { cooldownRemaining, isCoolingDown, markRateLimited, recordCancelled, recordFailure, recordStart, recordSuccess } from "./state.js";
+import { holdTunnel, noteTunnelRateLimited, planEgress, worthEscalating } from "./warp/index.js";
 
 const norm = (value) =>
   String(value || "")
@@ -130,6 +130,32 @@ async function upstreamFailure(response) {
     status: response.status,
     retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
   });
+}
+
+/**
+ * A controller for one try, tied to the attempt's own.
+ *
+ * An attempt that is retried through the tunnel makes two upstream requests, and
+ * they cannot share a controller: the deadline that ended the first one already
+ * aborted it, so the second would leave with a signal that is aborted before it
+ * starts. What must still carry across is everything decided from the outside —
+ * another provider winning the race, the client hanging up — so the outer signal
+ * is forwarded to whichever try is current.
+ */
+function linkedController(outer) {
+  const inner = new AbortController();
+  if (outer.signal.aborted) {
+    inner.abort(outer.signal.reason);
+    return { controller: inner, release() {} };
+  }
+  const forward = () => inner.abort(outer.signal.reason);
+  outer.signal.addEventListener("abort", forward, { once: true });
+  return {
+    controller: inner,
+    // Dropped as soon as the try is over: an attempt that escalates would
+    // otherwise leave a listener per try on a signal that outlives both.
+    release: () => outer.signal.removeEventListener("abort", forward),
+  };
 }
 
 /** Re-armable deadline that aborts the upstream request. */
@@ -345,7 +371,11 @@ function framesFromCompletion(json) {
 export function failureMessage(result) {
   const lines = [`⚠️  llm-failover-proxy: no provider could answer this request.`, ""];
   result.attempts.forEach((attempt, index) => {
-    lines.push(`  ${index + 1}. ${attempt.provider}/${attempt.model}, ${attempt.reason}: ${attempt.message}`);
+    // A model that was retried through the tunnel and failed anyway is a quota on
+    // the account rather than on this machine's address: saying so here is what
+    // stops the next hour being spent on the wrong fix.
+    const route = attempt.escalated ? " (retried through Cloudflare WARP, same answer)" : "";
+    lines.push(`  ${index + 1}. ${attempt.provider}/${attempt.model}, ${attempt.reason}: ${attempt.message}${route}`);
   });
   if (!result.attempts.length) lines.push("  (no provider was even eligible, check the chain configuration)");
   lines.push("");
@@ -423,9 +453,13 @@ async function raceWithTimer(promises, delayMs) {
  * A failure does not wait for the timer: the next candidate starts at once.
  * Set `hedgeDelayMs: 0` for strictly sequential failover.
  *
+ * @param plan an egress plan to use instead of asking the configuration for one.
+ *             Only tests pass it: escalation cannot be exercised against a
+ *             loopback provider, which is precisely the target `isLocalTarget`
+ *             refuses to send through a tunnel.
  * @returns {Promise<{type: 'json'|'stream'|'error'} & Record<string, any>>}
  */
-export async function run({ config, body, kind = "chat", sink = null, clientGone, requestId = "-" }) {
+export async function run({ config, body, kind = "chat", sink = null, clientGone, requestId = "-", plan = null }) {
   const { entries, matched, notFound } = resolveChain(config, body.model, kind);
 
   if (notFound) {
@@ -448,15 +482,16 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
   }
 
   /**
-   * Which way out, decided once for the whole request rather than per attempt.
+   * How each attempt in this chain is allowed to leave.
    *
-   * A chain that failed over would otherwise be reported half as WARP and half
-   * as direct, and `/stats` could then answer "where did this leave from" with
-   * neither. It also means one loopback probe per request instead of one per
-   * attempt — see `outboundPath`, which caches it for a couple of seconds.
+   * Under `warp.mode: "always"` this is one decision for the whole request, which
+   * is what lets `/stats` answer "where did this leave from" with one word. Under
+   * `on-rate-limit` it is a decision per model: the plan hands each attempt its
+   * own route, and a rate-limited one can move itself onto the tunnel without
+   * touching the models racing beside it.
    */
-  const path = await outboundPath(config);
-  if (path.unavailable) {
+  const egress = plan ?? (await planEgress(config));
+  if (egress.unavailable) {
     // Failing here rather than in every attempt: the chain is irrelevant, one
     // clear sentence about the tunnel is the whole answer.
     return {
@@ -470,10 +505,9 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
       attempts: [],
     };
   }
-  if (path.degraded) {
+  if (egress.degraded) {
     log.warn(`[${requestId}] ${c.yellow("warp tunnel down")} → going out directly instead, as configured`);
   }
-  const send = fetchVia(path);
 
   const order = orderByAvailability(entries);
   const limit = config.failover.maxAttempts > 0 ? Math.min(config.failover.maxAttempts, order.length) : order.length;
@@ -556,16 +590,76 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
         requestId,
       });
 
-      const settle = (async () => {
+      /** One upstream request, on the given route, with its own deadline. */
+      const tryOnce = async (route) => {
+        const { controller: own, release } = linkedController(controller);
+        // Held for as long as this attempt is travelling through the tunnel,
+        // streaming included: it is what stops a rotation replacing the tunnel
+        // underneath an answer that is still arriving.
+        const drop = route.via === "warp" ? holdTunnel() : null;
         try {
-          const shared = { config, entry, provider, adapter, body, controller, claim: claimFor(position), send };
-          return streaming ? await attemptStream({ ...shared, sink, meta }) : await attemptJson({ ...shared, kind });
+          const shared = { config, entry, provider, adapter, body, controller: own, claim: claimFor(position), send: route.send };
+          // The route is only known here, and the headers are written at commit:
+          // a streamed answer says which way it came in for the same reason a
+          // non-streamed one does.
+          const describe = () => ({ ...meta(), via: route.via, escalated: route.via === "warp" });
+          return streaming ? await attemptStream({ ...shared, sink, meta: describe }) : await attemptJson({ ...shared, kind });
         } catch (err) {
           if (err?.name === "ClientGoneError") return { kind: "gone" };
-          if (err?.name === "RaceLost" || controller.signal.reason?.name === "RaceLost") return { kind: "cancelled" };
-          if (controller.signal.reason?.name === "ClientGoneError") return { kind: "gone" };
+          const reason = own.signal.reason ?? controller.signal.reason;
+          if (err?.name === "RaceLost" || reason?.name === "RaceLost") return { kind: "cancelled" };
+          if (reason?.name === "ClientGoneError") return { kind: "gone" };
           return { kind: "fail", error: toAttemptError(err) };
+        } finally {
+          release();
+          drop?.();
         }
+      };
+
+      /**
+       * The attempt, and the second chance a rate limit earns it.
+       *
+       * All of it inside this one promise, which is what keeps the escalation to
+       * itself: the loop below is not waiting on it, the hedge timer keeps
+       * running, the models already in flight keep going out the way they were,
+       * and whichever of them produces something usable first still wins. This
+       * one just takes a little longer and arrives from somewhere else.
+       */
+      const settle = (async () => {
+        const first = await egress.routeFor(entry.id, requestId);
+        let outcome = await tryOnce(first);
+        let via = first.via;
+        let escalated = first.preferred === true;
+
+        // Not once this attempt is over anyway: the client hung up, or another
+        // model has already answered. Escalating then would ask for a tunnel
+        // nobody is waiting for, and send a request only to abort it.
+        const worthIt = outcome.kind === "fail" && !controller.signal.aborted && claimed === null && first.via !== "warp";
+
+        if (worthIt && worthEscalating(outcome.error)) {
+          const tunnel = await egress.escalate(requestId);
+          // Only once a tunnel was actually had. Remembering a rate limit the
+          // tunnel could not do anything about would send the next request at a
+          // port with nothing behind it, and trade a 429 for a network error.
+          if (tunnel) {
+            markRateLimited(entry.id, { retryAfterMs: outcome.error.retryAfterMs, cooldown: config.failover.cooldown });
+            log.info(
+              `[${requestId}] ${c.yellow("rate limited")} ${label(config, entry)} ` +
+                c.gray(`→ trying the same model again through ${c.cyan("WARP")}`),
+            );
+            outcome = await tryOnce(tunnel);
+            via = tunnel.via;
+            escalated = true;
+          }
+        }
+
+        // A 429 that came back *through* the tunnel is the exit address being
+        // throttled, not this model: no other model will do better from the same
+        // address, and no cooldown fixes it. It is the signal to draw a new
+        // session, which happens at the next moment nothing is using the tunnel.
+        if (via === "warp" && outcome.kind === "fail" && worthEscalating(outcome.error)) noteTunnelRateLimited();
+
+        return { ...outcome, via, escalated };
       })();
 
       task.promise = settle.then((outcome) => ({ position, outcome }));
@@ -637,11 +731,17 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
           status: info.status,
           message: info.message,
           latencyMs: latency,
+          // Which way this attempt gave up from. Worth saying: a rate limit that
+          // survived the tunnel too is a quota on the account, not on the address,
+          // and that is the difference between "wait" and "change something".
+          via: outcome.via,
+          escalated: outcome.escalated,
         });
         // A failure frees its slot immediately: no need to wait for the timer.
         const replaced = claimed === null ? launch() : false;
         log.warn(
           `[${requestId}] ${c.yellow("failed")} ${target} [${info.reason}] ${info.message}` +
+            `${outcome.escalated ? c.gray(" (through WARP too)") : ""}` +
             `${pause ? c.gray(` (benched ${ms(pause)})`) : ""}` +
             c.gray(replaced ? ` → trying ${label(config, order[launched - 1])}` : inFlight.size ? " → waiting on the others" : " → no backup left"),
         );
@@ -660,19 +760,26 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
         // A non-streamed answer has no first token of its own: the whole body
         // arrives at once, so the wait that ended is the request's own latency.
         const ttft = outcome.committedAt ? outcome.committedAt - task.startedAt : latency;
-        // The way this one left, decided once for the whole chain above: what
-        // makes `/stats` able to say WARP or direct, per request.
-        recordSuccess(task.entry.id, { latencyMs: latency, ttftMs: ttft, tokens: tokensOf(outcome.usage), via: path.via });
+        // The way this attempt left, which is the winner's own and not the
+        // chain's: under `on-rate-limit` the model that answered may be the one
+        // that escalated while the others were still going out directly.
+        recordSuccess(task.entry.id, {
+          latencyMs: latency,
+          ttftMs: ttft,
+          tokens: tokensOf(outcome.usage),
+          via: outcome.via,
+          escalated: outcome.escalated,
+        });
         log.info(
           `[${requestId}] ${c.green("ok")} ${target} (${place}${streaming ? ", stream" : ""}) ${ms(latency)}` +
+            `${outcome.escalated ? ` ${c.cyan("via WARP")}` : ""}` +
             `${outcome.usage ? ` ${compact(tokensOf(outcome.usage))} tok` : ""}` +
             `${dropped ? c.gray(` · ${dropped} speculative attempt(s) dropped`) : ""}`,
         );
       }
 
-      return streaming
-        ? { type: "stream", entry: task.entry, provider: task.provider, attempts, cancelled: dropped, degraded: Boolean(outcome.degraded) }
-        : { type: "json", json: outcome.json, entry: task.entry, provider: task.provider, attempts, cancelled: dropped };
+      const served = { entry: task.entry, provider: task.provider, attempts, cancelled: dropped, via: outcome.via, escalated: outcome.escalated };
+      return streaming ? { type: "stream", ...served, degraded: Boolean(outcome.degraded) } : { type: "json", json: outcome.json, ...served };
     }
 
     return {

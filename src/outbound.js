@@ -157,9 +157,29 @@ function agentFor(proxy) {
   return agent;
 }
 
-/** Drops the pooled tunnels, so nothing survives a rotation. */
-export function resetTunnels() {
-  for (const agent of agents.values()) agent.destroy();
+/**
+ * Retires the pooled tunnels: nothing new is handed to them, and whatever is
+ * still travelling through one is left to arrive.
+ *
+ * `agent.destroy()` is the obvious call here and it is the wrong one. Node's
+ * implementation walks `this.sockets` as well as `this.freeSockets`, so it tears
+ * down the sockets that are *carrying a request right now* — meaning a `warp
+ * rotate`, or saving any WARP setting from the Settings screen, would cut every
+ * answer in flight through the tunnel being replaced. Which is precisely what
+ * one model must never be able to do to another.
+ *
+ * So only the idle sockets are closed. Clearing `keepAlive` is what stops the
+ * busy ones from being pooled back onto an agent nobody will ask for again: each
+ * is dropped as its request finishes with it, and the agent is then collected.
+ */
+export function retireTunnels() {
+  for (const agent of agents.values()) {
+    agent.keepAlive = false;
+    for (const sockets of Object.values(agent.freeSockets)) {
+      // Copied: destroying a socket removes it from the list being walked.
+      for (const socket of [...sockets]) socket.destroy();
+    }
+  }
   agents.clear();
 }
 
