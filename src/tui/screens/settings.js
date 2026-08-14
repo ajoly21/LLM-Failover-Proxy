@@ -94,15 +94,22 @@ export const SETTINGS = [
   },
   {
     section: 'outbound',
-    label: 'route through Cloudflare WARP',
-    type: 'boolean',
-    hint: 'Should provider requests leave through a Cloudflare WARP tunnel?',
-    choices: [
-      ['yes', 'providers see a Cloudflare address, not this machine’s'],
-      ['no', 'requests go straight out, from this machine’s own address'],
-    ],
-    get: (c) => c.warp.enabled,
-    set: (c, v) => { c.warp.enabled = Boolean(v); },
+    // One setting with three answers, rather than an on/off plus a what-through:
+    // that pair could be left saying "route through WARP: yes, what goes through
+    // it: nothing", and a screen that can express a contradiction will.
+    label: 'what goes through WARP',
+    type: 'cycle',
+    options: ['nothing', 'only 429s', 'everything'],
+    hint: 'Which provider requests leave through the Cloudflare WARP tunnel.',
+    example: 'nothing = straight out, no tunnel at all · only 429s = a rate-limited model retries through it',
+    get: (c) => (!c.warp.enabled ? 'nothing' : c.warp.mode === 'on-rate-limit' ? 'only 429s' : 'everything'),
+    set: (c, v) => {
+      c.warp.enabled = v !== 'nothing';
+      // `nothing` leaves the mode where it was, so coming back to the tunnel
+      // restores the choice that was made about it rather than a default.
+      if (v === 'only 429s') c.warp.mode = 'on-rate-limit';
+      else if (v === 'everything') c.warp.mode = 'always';
+    },
   },
   {
     section: 'outbound',

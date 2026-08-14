@@ -42,8 +42,10 @@ const RECENT_COLUMNS = [
     width: 8,
     drop: 2,
     // A dash is a row served by a proxy too old to record the path, which is not
-    // the same as one that is known to have gone out directly.
-    text: (row) => row.via || '-',
+    // the same as one that is known to have gone out directly. `warp 429` is a
+    // model that was rate-limited and got round it through the tunnel — the row
+    // to count if you want to know whether escalating is buying anything.
+    text: (row) => (row.via === 'warp' && row.escalated ? 'warp 429' : row.via || '-'),
     color: (row) => (row.via === 'warp' ? COLOR.accent : undefined),
   },
 ];
@@ -232,12 +234,17 @@ export function StatusScreen({ config, onBack, fetchStats = defaultFetch, pollMs
  */
 function WarpLine({ warp }) {
   const up = warp.alive;
+  // Under `on-rate-limit` the tunnel is in reserve, so a `direct` row below is
+  // the expected state and not a leak — and a tunnel that is down is a second
+  // chance nobody has needed yet, which is a warning rather than a failure.
+  const reserved = warp.mode === 'on-rate-limit';
+  const label = reserved ? 'direct, Cloudflare WARP on a 429' : 'Cloudflare WARP';
   return h(
     Text,
     { wrap: 'truncate' },
     h(Text, { dimColor: true }, '  outbound  '),
-    h(Text, { color: up ? COLOR.accent : COLOR.fail }, up ? 'Cloudflare WARP' : 'Cloudflare WARP, tunnel down'),
-    !up && warp.fallbackDirect ? h(Text, { color: COLOR.warn }, ' — falling back to direct') : null,
+    h(Text, { color: up ? COLOR.accent : reserved ? COLOR.warn : COLOR.fail }, up ? label : `${label}, tunnel down`),
+    !up && !reserved && warp.fallbackDirect ? h(Text, { color: COLOR.warn }, ' — falling back to direct') : null,
     warp.rotatedAt ? h(Text, { dimColor: true }, ` · rotated ${ago(Date.parse(warp.rotatedAt))}`) : null,
   );
 }

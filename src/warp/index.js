@@ -1,79 +1,18 @@
 import { processAlive } from "../daemon.js";
 import { log } from "../logger.js";
-import { proxiedFetch, resetTunnels } from "../outbound.js";
+import { forgetTunnelProbe, withTunnel } from "./egress.js";
+import { warpEnabled, warpMode } from "./mode.js";
 import { supported } from "./platform.js";
 import { warpDir, warpPaths } from "./paths.js";
-import { listening, proxyUrl, readState, rotateTunnel, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
+import { describeSession, newSession } from "./rotate.js";
+import { proxyUrl, readState, resetIdentity, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
 
+export { fetchVia, forgetTunnelProbe, holdTunnel, outboundPath, planEgress, tunnelInUse, withTunnel, worthEscalating } from "./egress.js";
+export { warpEnabled, warpMode } from "./mode.js";
 export { UnsupportedPlatformError, WGCF_VERSION, WIREPROXY_VERSION, supported } from "./platform.js";
 export { warpDir, warpPaths } from "./paths.js";
-export { proxyUrl, readState, rotateTunnel, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
-
-/**
- * Whether the providers are reached through Cloudflare WARP, and how.
- *
- * The default is off, and off costs nothing: no binary is downloaded, no process
- * runs, and requests go out exactly as they did before this module existed. An
- * install that upgrades into this version behaves identically until somebody
- * turns it on.
- */
-export function warpEnabled(config) {
-  return Boolean(config?.warp?.enabled);
-}
-
-/* ------------------------------------------------------------------ *
- * Which way out                                                       *
- * ------------------------------------------------------------------ */
-
-/**
- * Probing the tunnel costs a loopback connection, and a request that hedges asks
- * more than once. Two seconds is short enough that `warp up` in another terminal
- * is picked up while a person is still looking at the screen.
- */
-const PROBE_TTL_MS = 2000;
-let probe = { at: 0, port: null, up: false };
-
-async function tunnelUp(configFile, port) {
-  if (probe.port === port && Date.now() - probe.at < PROBE_TTL_MS) return probe.up;
-  // Both checks, for the reason `tunnelStatus` sets out: a port that answers
-  // without our own process behind it is somebody else's proxy, and provider
-  // traffic must not be handed to it just because the number matched.
-  const up = (await listening(port)) && processAlive(Number(readState(configFile).pid));
-  probe = { at: Date.now(), port, up };
-  return up;
-}
-
-/** Forces the next check to ask again: the tunnel just changed underneath us. */
-export function forgetTunnelProbe() {
-  probe = { at: 0, port: null, up: false };
-  // Sockets pooled through the old tunnel are worthless once it is replaced.
-  resetTunnels();
-}
-
-/**
- * The path this request should take, decided once for the whole request rather
- * than per attempt — a chain that failed over halfway would otherwise be half
- * reported as WARP and half as direct, and the stats would say neither.
- *
- * @returns {Promise<{via: 'warp'|'direct', proxyUrl: string|null, unavailable?: boolean, degraded?: boolean}>}
- */
-export async function outboundPath(config) {
-  if (!warpEnabled(config)) return { via: "direct", proxyUrl: null };
-
-  const port = Number(readState(config.__file).httpPort) || config.warp.httpPort;
-  if (await tunnelUp(config.__file, port)) return { via: "warp", proxyUrl: `http://127.0.0.1:${port}` };
-
-  // WARP is on and the tunnel is not. Falling back silently would send the
-  // request from the address the user turned this on to hide, so it is a choice
-  // they make explicitly and the stats record which way it went.
-  if (config.warp.fallbackDirect) return { via: "direct", proxyUrl: null, degraded: true };
-  return { via: "warp", proxyUrl: `http://127.0.0.1:${port}`, unavailable: true };
-}
-
-/** The `fetch` to use for `path`. */
-export function fetchVia(path) {
-  return path.proxyUrl ? proxiedFetch(path.proxyUrl) : fetch;
-}
+export { clearTunnelRateLimited, describeSession, exitAddress, newSession, noteTunnelRateLimited, rotationPending, rotationVerdict, startRotationSchedule } from "./rotate.js";
+export { proxyUrl, readState, resetIdentity, restartTunnel, startTunnel, stopTunnel, tunnelLogTail, tunnelStatus } from "./tunnel.js";
 
 /* ------------------------------------------------------------------ *
  * Lifecycle, driven by the configuration                              *
@@ -86,6 +25,10 @@ export function fetchVia(path) {
  * changes, which is what makes the toggle in the Settings screen take effect on
  * a running server without anyone restarting anything. Never throws: WARP
  * failing to install must not stop the proxy from serving, it must be reported.
+ *
+ * Both modes start the tunnel, `on-rate-limit` included. A wireproxy sitting
+ * there with nothing going through it costs one idle process, and it is what
+ * spares the first rate-limited attempt the wait for one to come up.
  *
  * @returns {Promise<{action: string, detail?: string}>}
  */
@@ -109,7 +52,11 @@ export async function syncTunnel(config) {
 
   try {
     const result = await startTunnel(config);
-    forgetTunnelProbe();
+    // Only when the tunnel actually moved. An unrelated WARP setting saved from
+    // the Settings screen adopts the serving tunnel and reaches here as
+    // `already-running`: retiring a healthy socket pool for that would make every
+    // request that follows pay for a fresh handshake, for no change at all.
+    if (result.status !== "already-running") forgetTunnelProbe();
     if (result.status === "failed") {
       log.error(`warp: the tunnel did not come up${result.detail ? `\n${result.detail}` : ""}`);
       return { action: "failed", detail: result.detail };
@@ -122,18 +69,36 @@ export async function syncTunnel(config) {
 }
 
 /**
- * `warp rotate`: a new WARP identity, hence a new exit address.
+ * `warp rotate`: a new tunnel session, hence in all likelihood a new exit address.
  *
- * What the new address *is* is deliberately not reported: WARP does not egress
- * from a single one, so any figure printed here would be the address one probe
- * happened to leave from and not the one the next request will use. What can
- * honestly be said is that the identity was replaced and the tunnel came back up.
+ * The identity is left alone, because it turns out to have nothing to do with the
+ * address — Cloudflare draws that when a session is established. See
+ * `restartTunnel` for the measurements. `resetIdentity` is the separate command
+ * for the separate problem of credentials that must not be used again.
+ *
+ * The new address *is* reported, which an earlier version of this refused to do on
+ * the grounds that WARP does not egress from a single address. It does, per
+ * session: ten requests through one session all left from the same one. So the
+ * question has an answer, and one trace request on the way in and out is what
+ * turns "the tunnel was restarted" into "it now leaves from somewhere else" —
+ * worth knowing, since roughly three restarts in ten change nothing.
  */
-export async function rotate(config) {
-  const result = await rotateTunnel(config);
-  forgetTunnelProbe();
-  if (result.status === "failed") return { ok: false, ...result };
-  return { ok: true, ...result };
+export async function rotate(config, options = {}) {
+  // Through the lock, so a rotation cannot land in the middle of this process
+  // bringing the tunnel up for a rate-limited attempt.
+  const result = await withTunnel(() => newSession(config, options));
+  if (result === null) return { ok: false, changed: null, tries: 0, before: null, after: null, detail: "the tunnel is busy being started or replaced" };
+  return result;
+}
+
+/** `warp reset-identity`: throw the WARP device registration away. */
+export async function resetWarpIdentity(config) {
+  const result = await withTunnel(async () => {
+    const started = await resetIdentity(config);
+    return started.status === "failed" ? { ok: false, detail: started.detail } : { ok: true, ...started };
+  });
+  if (result === null) return { ok: false, detail: "the tunnel is busy being started or replaced" };
+  return result;
 }
 
 /**
@@ -148,6 +113,10 @@ export function warpSummary(config) {
   const state = readState(config.__file);
   return {
     enabled: true,
+    // What the `via` of each row below is allowed to be: under `always` every
+    // row says warp, under `on-rate-limit` a row saying warp is a model that hit
+    // its quota and was retried through the tunnel.
+    mode: warpMode(config),
     httpPort: Number(state.httpPort) || config.warp.httpPort,
     socksPort: Number(state.socksPort) || config.warp.socksPort,
     endpoint: state.endpoint ?? config.warp.endpoint,
@@ -167,6 +136,7 @@ export async function warpReport(config) {
   const status = await tunnelStatus(config);
   return {
     enabled: warpEnabled(config),
+    mode: warpMode(config),
     supported: platform.ok,
     unsupportedReason: platform.reason,
     running: status.running,

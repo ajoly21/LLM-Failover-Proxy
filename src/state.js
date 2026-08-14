@@ -37,6 +37,11 @@ function blank() {
     lastLatencyMs: null,
     lastUsedAt: null,
     tokens: 0,
+    // Attempts this entry sent through the tunnel after being rate-limited.
+    escalated: 0,
+    // Until when this entry is known to be throttled on the direct route, so the
+    // next request can start on the tunnel instead of spending a 429 to find out.
+    warpUntil: 0,
   };
 }
 
@@ -57,6 +62,44 @@ export function cooldownRemaining(id, now = Date.now()) {
   return Math.max(0, stateFor(id).cooldownUntil - now);
 }
 
+/* ------------------------------------------------------------------ *
+ * Which way this entry should leave                                   *
+ * ------------------------------------------------------------------ */
+
+/**
+ * This entry was rate-limited on the direct route and retried through the tunnel.
+ *
+ * Remembering it is the whole economy of the thing: without this every single
+ * request pays a `429` before escalating, and the quota the provider is
+ * enforcing gets hit again and again for no gain. The window is what the provider
+ * asked for in `Retry-After` when it said, and a short one otherwise.
+ *
+ * Not a cooldown, and deliberately kept apart from one: a benched entry is one
+ * the chain steps over, this one is fully in play and merely leaves by a
+ * different door.
+ */
+export function markRateLimited(id, { retryAfterMs = null, cooldown } = {}) {
+  const { baseMs = 15000, maxMs = 300000 } = cooldown || {};
+  const state = stateFor(id);
+  state.escalated += 1;
+  state.warpUntil = Date.now() + Math.min(retryAfterMs ?? baseMs, maxMs);
+  flushStats();
+  return state.warpUntil;
+}
+
+/**
+ * The route this entry should try first.
+ *
+ * `direct` once the window has passed, always — the quota may well have refilled,
+ * and a preference that never expired would leave a model on the tunnel for the
+ * rest of the process's life because of one 429 an hour ago.
+ *
+ * @returns {'direct'|'warp'}
+ */
+export function preferredVia(id, now = Date.now()) {
+  return stateFor(id).warpUntil > now ? "warp" : "direct";
+}
+
 /**
  * Not persisted on its own: the outcome of the same attempt follows within
  * milliseconds to seconds and writes both counters at once.
@@ -66,7 +109,7 @@ export function recordStart(id) {
   state.requests += 1;
 }
 
-export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0, via = null } = {}) {
+export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0, via = null, escalated = false } = {}) {
   const state = stateFor(id);
   state.successes += 1;
   state.consecutiveFailures = 0;
@@ -74,6 +117,10 @@ export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0,
   state.cooldownReason = null;
   state.lastError = null;
   state.lastLatencyMs = latencyMs;
+  // The direct route answered, so whatever quota closed it has reopened: stop
+  // sending this entry through the tunnel. An answer that came *through* the
+  // tunnel says nothing of the sort and leaves the window where it was.
+  if (via === "direct") state.warpUntil = 0;
   // Stamped on the answer, not on the attempt: a model that was asked and then
   // dropped for losing a race was never used, and saying "used 3s ago" about it
   // would be the wrong answer to "is this model pulling its weight".
@@ -88,6 +135,9 @@ export function recordSuccess(id, { latencyMs = null, ttftMs = null, tokens = 0,
     at: state.lastUsedAt,
     ttftMs: nullableNum(ttftMs),
     via: via ?? null,
+    // Whether that path was the one asked for or the one fallen back on. A row
+    // reading `warp` under `mode: "on-rate-limit"` is only legible with this.
+    escalated: Boolean(escalated),
   });
   if (recent.length > RECENT_LIMIT) recent.length = RECENT_LIMIT;
   flushStats();
@@ -154,6 +204,7 @@ const NO_COUNTERS = {
   failures: 0,
   cancelled: 0,
   tokens: 0,
+  escalated: 0,
   lastLatencyMs: null,
   lastUsedAt: null,
   coolingDown: false,
@@ -259,6 +310,7 @@ function restoreFrom(file, knownIds) {
         // Absent from every file written before WARP existed, which is a row
         // whose path is simply unknown — not one that went out directly.
         via: typeof call.via === "string" ? call.via : null,
+        escalated: call.escalated === true,
       }));
   }
   log.debug(`stats restored for ${restored} entry(ies)${dropped ? `, ${dropped} obsolete dropped` : ""}`);
@@ -282,6 +334,10 @@ function sanitize(saved) {
   state.tokens = Math.max(0, num(saved?.tokens));
   state.lastLatencyMs = nullableNum(saved?.lastLatencyMs);
   state.lastUsedAt = nullableNum(saved?.lastUsedAt);
+  state.escalated = Math.max(0, num(saved?.escalated));
+  // Restored for the same reason a cooldown is: a `Retry-After` of an hour must
+  // not be forgotten just because the proxy was restarted inside it.
+  state.warpUntil = Math.max(0, num(saved?.warpUntil));
 
   const lastError = saved?.lastError;
   if (lastError && typeof lastError === "object" && typeof lastError.reason === "string") {
