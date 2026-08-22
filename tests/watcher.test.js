@@ -113,7 +113,7 @@ test("a request is answered with the file on disk, even with the watcher dead", 
       assert.equal(config.models[0].model, first, "the file now leads with this");
 
       const answer = await fetch(`http://127.0.0.1:${port}/v1/models`).then((response) => response.json());
-      const order = answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+      const order = answer.data.filter((entry) => !entry.id.startsWith("auto")).map((entry) => entry.id);
       assert.deepEqual(order, [`a${first.slice(-1)}`, `a${second.slice(-1)}`], "the request read the file, not a stale copy");
     }
   } finally {
@@ -151,7 +151,7 @@ test("switching model list swaps the chain a running proxy serves", async () => 
   const { port } = app.server.address();
   const served = async () => {
     const answer = await fetch(`http://127.0.0.1:${port}/v1/models`).then((response) => response.json());
-    return answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+    return answer.data.filter((entry) => !entry.id.startsWith("auto")).map((entry) => entry.id);
   };
   try {
     assert.deepEqual(await served(), ["a2"], "the list in use when the server started");

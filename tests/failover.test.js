@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { addTarget, describeTarget, loadConfig, saveConfig, switchTarget } from "../src/config.js";
 import { assemble, backend, postJson, readStream, startProxy } from "./helpers.js";
 import { startMock } from "./mock-provider.js";
 
@@ -441,10 +442,11 @@ test("utility endpoints: /v1/models, /health, /stats and an unknown route", asyn
   try {
     const models = await (await fetch(`${proxy.url}/v1/models`)).json();
     assert.equal(models.object, "list");
-    // One id per alias, without the provider/model form that would duplicate it.
+    // The chain under its list's id, then one id per alias — without the
+    // provider/model form, which would only duplicate the alias.
     assert.deepEqual(
       models.data.map((entry) => entry.id),
-      ["auto", "primary"],
+      ["auto - default", "primary"],
     );
     assert.equal(models.data[1].owned_by, "single");
 
@@ -535,5 +537,157 @@ test("unresolved API key (missing env var): entry skipped without any network ca
   } finally {
     await proxy.close();
     await Promise.all(mocks.map((mock) => mock.close()));
+  }
+});
+
+test("a list nobody switched to still answers, under its own id", async () => {
+  // What per-list ids are for: one client talks and another embeds, through the
+  // same proxy, with nothing switched between the two requests.
+  const talker = await startMock("ok", { name: "talker" });
+  const embedder = await startMock("ok", { name: "embedder" });
+  const proxy = await startProxy(assemble([backend(talker, { model: "m-1", alias: "primary" })]));
+  try {
+    const seed = loadConfig(proxy.file);
+    const list = addTarget(seed, "embeddings");
+    describeTarget(seed, list.id, "what everything is embedded with");
+    seed.providers.push({ id: "prov_embedder", name: "embedder", type: "openai", baseUrl: embedder.baseUrl, apiKey: "sk-test", headers: {}, enabled: true });
+    seed.models.push({ id: "mdl_embedder", providerId: "prov_embedder", model: "emb-1", alias: "emb", kind: "embedding", enabled: true, params: {} });
+    switchTarget(seed, seed.modelLists[0].id); // the chat chain goes back to being the live one
+    saveConfig(seed, proxy.file);
+
+    const models = await (await fetch(`${proxy.url}/v1/models`)).json();
+    assert.deepEqual(
+      models.data.map((entry) => entry.id),
+      ["auto - default", "auto - embeddings", "primary"],
+      "both chains are offered, the live one first",
+    );
+
+    // The parked list, asked for by name.
+    const embedded = await postJson(`${proxy.url}/v1/embeddings`, { model: "auto - embeddings", input: "hello" });
+    assert.equal(embedded.status, 200);
+    assert.equal(embedded.headers.get("x-llm-proxy-provider"), "embedder");
+    assert.equal(embedded.json.data[0].embedding.length, 3);
+
+    // While the live chain goes on answering everything else.
+    const answer = await postJson(`${proxy.url}/v1/chat/completions`, CHAT);
+    assert.equal(answer.headers.get("x-llm-proxy-provider"), "talker");
+
+    // Asking a list for what it does not hold names the list that came up empty.
+    const wrong = await postJson(`${proxy.url}/v1/chat/completions`, { ...CHAT, model: "auto - embeddings" });
+    assert.equal(wrong.status, 503);
+    assert.match(wrong.json.error.message, /No chat model configured or enabled in the model list "embeddings"/);
+
+    // And what another list served shows in /stats, on a row of its own: outside
+    // the live list's totals, which is what every reader counts as "elsewhere".
+    const stats = await (await fetch(`${proxy.url}/stats`)).json();
+    const row = stats.chain.find((entry) => entry.id === "mdl_embedder");
+    assert.equal(row.successes, 1);
+    assert.equal(row.list, "embeddings");
+    assert.equal(row.priority, stats.chain.length, "kept after the live chain, never mixed into it");
+    assert.equal(stats.totals.successes, 1, "the live list's own account, which that request is no part of");
+    assert.equal(stats.recent.find((call) => call.id === "mdl_embedder").list, "embeddings");
+  } finally {
+    await proxy.close();
+    await talker.close();
+    await embedder.close();
+  }
+});
+
+/** A provider that is configured and never called: /health asks nobody anything. */
+const OFFLINE = { id: "prov_1", name: "p", type: "openai", baseUrl: "http://127.0.0.1:9/v1", apiKey: null, headers: {}, enabled: true };
+const ENTRY = (id, kind) => ({ id, providerId: "prov_1", model: id, alias: id, kind, enabled: true, params: {} });
+
+test("health check on one list, for a probe that may not spend a token", async () => {
+  const proxy = await startProxy({ providers: [OFFLINE], models: [ENTRY("m-1", "chat")] });
+  try {
+    const seed = loadConfig(proxy.file);
+    const embeddings = addTarget(seed, "embeddings");
+    describeTarget(seed, embeddings.id, "what everything is embedded with");
+    seed.models.push(ENTRY("e-1", "embedding"));
+    switchTarget(seed, seed.modelLists[0].id); // the chat chain is the live one again
+    saveConfig(seed, proxy.file);
+
+    const ask = async (query) => {
+      const response = await fetch(`${proxy.url}/health${query}`);
+      return { status: response.status, json: await response.json() };
+    };
+
+    // Nothing named: still "are you there", now with what each list could answer,
+    // so one request is enough to check every id a client is configured with.
+    const plain = await ask("");
+    assert.equal(plain.status, 200);
+    assert.equal(plain.json.embeddingModels, 0, "of the live chain, which holds none");
+    assert.deepEqual(
+      plain.json.lists.map((list) => [list.id, list.chat, list.embedding]),
+      [
+        ["auto - default", 1, 0],
+        ["auto - embeddings", 0, 1],
+      ],
+    );
+
+    // The id an application is configured with, however it spells it — and the
+    // `lst_…` id of the file, for whatever reads that instead.
+    for (const query of ["?list=embeddings", "?model=auto%20-%20embeddings", "?model=auto-embeddings", `?list=${embeddings.id}`]) {
+      const answer = await ask(query);
+      assert.equal(answer.status, 200, query);
+      assert.equal(answer.json.model, "auto - embeddings", query);
+      assert.equal(answer.json.models, 1, query);
+      assert.equal(answer.json.active, false, query, "a list nobody switched to is still one that answers");
+      assert.equal(answer.json.description, "what everything is embedded with", query);
+    }
+
+    // Pointed at the wrong endpoint: the list exists and cannot answer, which is
+    // a different fault from a name that does not exist, and a different code.
+    const asChat = await ask("?list=embeddings&kind=chat");
+    assert.equal(asChat.status, 503);
+    assert.equal(asChat.json.status, "unavailable");
+    assert.equal(asChat.json.chat, 0);
+    assert.match(asChat.json.message, /no usable chat model/);
+
+    // A kind on its own asks about the chain being served: the liveness check.
+    assert.equal((await ask("?kind=chat")).status, 200);
+    assert.equal((await ask("?kind=embedding")).status, 503, "the live chain holds no embedding model");
+    assert.equal((await ask("?kind=any")).status, 200);
+    assert.equal((await ask("?kind=sideways")).status, 400, "and a kind that is neither is refused rather than guessed at");
+
+    // A typo is never answered by the fallback chain: that would report another
+    // chain's health under the name the probe asked about.
+    const typo = await ask("?list=embedings");
+    assert.equal(typo.status, 404);
+    assert.equal(typo.json.status, "unknown");
+    assert.deepEqual(typo.json.lists, ["auto - default", "auto - embeddings"]);
+
+    // A list with nothing usable in it is unavailable, not unknown.
+    const parked = loadConfig(proxy.file);
+    parked.modelLists.find((list) => list.name === "embeddings").models[0].enabled = false;
+    saveConfig(parked, proxy.file);
+    const disabled = await ask("?list=embeddings");
+    assert.equal(disabled.status, 503);
+    assert.equal(disabled.json.models, 0);
+    assert.equal((await fetch(`${proxy.url}/v1/models`).then((r) => r.json())).data.length, 2, "and it drops out of the catalogue");
+  } finally {
+    await proxy.close();
+  }
+});
+
+test("the health check needs no proxy key, and spells no name out to a caller without one", async () => {
+  const proxy = await startProxy({ providers: [OFFLINE], models: [ENTRY("m-1", "chat")], server: { apiKey: "sk-proxy-secret" } });
+  const key = { authorization: "Bearer sk-proxy-secret" };
+  try {
+    // A probe should not need a secret to say whether the thing is up, so the
+    // verdict is given either way…
+    const open = await fetch(`${proxy.url}/health?list=default`);
+    assert.equal(open.status, 200);
+    const anonymous = await fetch(`${proxy.url}/health?list=nope`);
+    assert.equal(anonymous.status, 404);
+
+    // …but the names of the lists are only enumerated to a caller that could
+    // have read them from the configuration anyway.
+    assert.equal((await anonymous.json()).lists, undefined);
+    assert.equal((await (await fetch(`${proxy.url}/health`)).json()).lists, undefined);
+    assert.deepEqual((await (await fetch(`${proxy.url}/health?list=nope`, { headers: key })).json()).lists, ["auto - default"]);
+    assert.ok((await (await fetch(`${proxy.url}/health`, { headers: key })).json()).lists, "the whole picture, with the key");
+  } finally {
+    await proxy.close();
   }
 });

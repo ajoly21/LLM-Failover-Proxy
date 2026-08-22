@@ -19,7 +19,7 @@ import { envPathFor } from "./env.js";
 import { describeInstall, pathAdvice } from "./install.js";
 import { checkForUpdate, updateCommand, updateCommandLine } from "./update.js";
 import { c, compact, ESC, ago, ms, percent, setLogLevel } from "./logger.js";
-import { resolveChain } from "./router.js";
+import { autoModelId, resolveChain } from "./router.js";
 import { startServer } from "./server.js";
 import { alignChain } from "./state.js";
 import { describeSession, resetWarpIdentity, rotate, startTunnel, stopTunnel, syncTunnel, tunnelLogTail, warpReport, warpSummary } from "./warp/index.js";
@@ -127,7 +127,7 @@ export async function showStatus(config) {
 
   const chain = resolveChain(config, "auto", "chat");
   say("");
-  say(`${c.bold("Effective failover order (chat)")} ${c.gray('for model="auto"')}`);
+  say(`${c.bold("Effective failover order (chat)")} ${c.gray(`for model="${autoModelId(list.name)}"`)}`);
   if (!chain.entries.length) say(c.yellow("  no usable model (provider disabled, or missing base URL?)"));
   else {
     chain.entries.forEach((entry, index) => say(`  ${String(index + 1).padStart(2)}. ${providerLabel(config, entry.providerId)}/${entry.model}`));
@@ -198,6 +198,9 @@ export function showLists(config, { json = false } = {}) {
   const rows = targets.map((entry, index) => ({
     index: index + 1,
     name: entry.name,
+    // The id this list answers to whether or not it is the active one: what a
+    // client puts in its model field to be served by this chain and no other.
+    model: autoModelId(entry.name),
     active: entry.id === config.activeListId,
     description: entry.description || "",
     // The active list mirrors `config.models`, so both read the same numbers.
@@ -229,6 +232,9 @@ export function showLists(config, { json = false } = {}) {
   }
   say("");
   say(`  ${c.gray("switch with")} ${c.cyan("llmfp use <name|index>")}   ${c.gray("· the chain itself is in")} ${c.cyan("llmfp status")}`);
+  // Switching is for the person; a client picks its chain by name and switches
+  // nothing, which is what makes one agent talk and another embed at once.
+  say(`  ${c.gray("or ask for any of them by name, with no switch:")} ${c.cyan(autoModelId("<name>"))} ${c.gray("· see")} ${c.cyan("GET /v1/models")}`);
   if (rows.some((row) => !row.description)) {
     say(`  ${c.gray("a list with no note is one you will have to open to understand — press")} ${c.cyan("w")} ${c.gray("on Models lists to write it")}`);
   }
@@ -290,6 +296,9 @@ function listPurposes(config, { json }) {
     models: entry.models.length,
     enabled: entry.models.filter((model) => model.enabled).length,
     active: entry.id === config.activeListId,
+    // The id this list is served under, for a caller that picks a chain per
+    // request rather than switching the one everything shares.
+    model: autoModelId(entry.name),
     // Spelled out rather than left to be assembled: a caller that reads this has
     // one less thing to get wrong, quoting included.
     use: `llmfp use ${asArgument(entry.name)}`,
@@ -314,6 +323,9 @@ function listPurposes(config, { json }) {
     // the whole point of this report, so its absence is the news.
     if (row.description) say(`    ${row.description}`);
     else say(`    ${c.yellow("no note yet")} ${c.gray(`— ${c.cyan(`llmfp describe ${asArgument(row.name)} "when this list should serve"`)}`)}`);
+    // Two ways to act on the choice: ask for this chain in one request, or make
+    // it the one everything gets. The first needs nothing switched.
+    say(`    ${c.gray("model id")}  ${c.cyan(row.model)}`);
     if (!row.active) say(`    ${c.cyan(row.use)}`);
   }
   say("");

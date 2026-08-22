@@ -165,22 +165,83 @@ In an app that asks for settings (Cursor, Continue, Open WebUI, Zed, LibreChat�
 | ------------------- | ----------------------------------------------------------------------- |
 | Base URL / API host | `http://127.0.0.1:47821/v1`                                             |
 | API key             | anything, e.g. `unused` (unless you set one, see [Settings](#settings)) |
-| Model               | `auto`                                                                  |
+| Model               | `auto - default`, one id per model list (see below)                     |
 
-Streaming, tools/function calling, vision, JSON mode and embeddings all pass straight through.
+Streaming, tools/function calling, vision, JSON mode and embeddings all pass straight through — embeddings on their own endpoint and, if you want, their own chain: see [one list to talk with, another to embed with](#one-list-to-talk-with-another-to-embed-with).
 
 ### Which model name to ask for
 
-| You send            | What happens                                                        |
-| ------------------- | ------------------------------------------------------------------- |
-| `auto` (or nothing) | your whole chain, in priority order, **the usual choice**           |
-| an **alias**        | entries with that alias first, then the rest of the chain as backup |
-| `provider/model`    | that exact entry first, then the rest of the chain                  |
-| something unknown   | falls back to the default chain                                     |
+| You send            | What happens                                                                                                      |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `auto - <list>`     | that model list, in its priority order, **the usual choice** — served whether or not it is the one being switched to |
+| `auto` (or nothing) | the list being served, whichever that is: the shorthand, kept from every earlier version                          |
+| an **alias**        | entries with that alias first, then the rest of the served chain as backup                                        |
+| `provider/model`    | that exact entry first, then the rest of the served chain                                                         |
+| something unknown   | falls back to the served chain                                                                                    |
 
-Giving several entries the same alias makes a **failover group**: `fast` can mean one provider, then another, then a local model, in that order. `GET /v1/models` lists what is available.
+Giving several entries the same alias makes a **failover group**: `fast` can mean one provider, then another, then a local model, in that order.
+
+`GET /v1/models` lists **one `auto - <list>` per model list** — the one being served first, so a client that takes the first id it is offered lands on it — then the aliases of that chain. Each list carries its note as `description`, so whatever reads the catalogue also reads what the list is for. `auto` on its own still answers and is no longer advertised: it names no list, so a picker showing it says nothing about which chain served the answer.
+
+**Which list answers is the client's to choose, and costs no switch.** Asking for `auto - embeddings` serves that list and changes nothing for anything else; `llmfp use` and `←→` are still there, and are for moving the default the rest of your tools share.
 
 Every answer says who served it, in the response headers: `x-llm-proxy-provider`, `x-llm-proxy-model`, `x-llm-proxy-attempt` (position in the chain), `x-llm-proxy-fallbacks` (how many failed first).
+
+### One list to talk with, another to embed with
+
+`POST /v1/embeddings` fails over exactly like chat. A model entry is `chat` or `embedding` — the `KIND` column, and what the `a` form asks right after the alias — and only entries of the kind asked for are ever tried, so the two never cross. What per-list ids add is being able to keep them in separate chains and have both served at once:
+
+```
+llmfp                     # Models lists → n → name it `embeddings` → a → add your embedding models
+llmfp describe embeddings "what everything is embedded with"
+```
+
+Then, in a tool that asks for both:
+
+| Field                   | Value               |
+| ----------------------- | ------------------- |
+| Chat / completion model | `auto - default`    |
+| Embedding model         | `auto - embeddings` |
+
+Nothing is switched between the two: each request names the chain it wants, and each falls over inside that chain alone. A list holding nothing but embedding models has no chat chain and says which list came up empty rather than quietly serving something else: `No chat model configured or enabled in the model list "embeddings"`.
+
+The answer shape (`data[].embedding`, `usage`) is passed through untouched, an empty or malformed vector counts as an unusable answer and moves to the next model, and a provider speaking Anthropic's protocol — which has no embeddings endpoint — is skipped with a reason rather than tried. The one thing an embedding row does not get is `t`: the test key sends a chat request, so those rows are proven by the first real `/v1/embeddings` call instead, and counted in `/stats` like everything else.
+
+### Checking it works, without spending a token
+
+Three endpoints answer from the configuration alone. No provider is called, so nothing is billed and no token is spent:
+
+| Request                | Key needed                             | What it answers                                                                          |
+| ---------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `GET /health` (or `/`) | **no**, even when a proxy key is set   | the process is listening, and what each model list could answer                           |
+| `GET /v1/models`       | yes, if you set one                    | the ids a client may ask for                                                              |
+| `GET /stats`           | yes, if you set one                    | the counters of real traffic: successes, failures, `coolingDown`, `lastError`, `recent`   |
+
+**`/health` also answers about one chain** — which is what an application configured with `auto - embeddings` actually needs to know:
+
+```bash
+curl -fsS 'http://127.0.0.1:47821/health?list=embeddings'
+# {"status":"ok","service":"llm-failover-proxy","model":"auto - embeddings","list":"embeddings",
+#  "active":false,"kind":"any","models":2,"chat":0,"embedding":2,
+#  "description":"what everything is embedded with"}
+```
+
+The status code carries the verdict, so a probe can branch on it and never read the body:
+
+| Code  | Means                                                                                                                             |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `200` | at least one model in that list can be tried                                                                                      |
+| `503` | the list exists and can answer nothing: everything in it is disabled, or its provider is                                           |
+| `404` | no list goes by that name. A typo is **never** answered by the fallback chain, which would report another chain's health as its own |
+| `400` | `kind` was neither `chat`, `embedding` nor `any`                                                                                 |
+
+- `?list=` takes the `auto - <name>` id, the bare name, or the `lst_…` id from the file — and `?model=` is the same parameter under the name a client knows it by, so a probe can be configured with the exact string the application sends.
+- `?kind=chat` or `?kind=embedding` narrows the count to the endpoint you care about. A list of embedding models answers `200` on its own and `503` for `kind=chat`: that is the mistake worth catching before production catches it.
+- Nothing named but a kind given — `/health?kind=chat` — asks about the chain being served, which is the plain liveness check with a real verdict: `503` when nothing could answer.
+- No key is ever required: a probe should not need a secret to say whether the thing is up. List *names* are only enumerated — in the `404` body, and in `lists` on the plain `/health` — for a caller presenting the key, when one is set.
+- Only `GET` is routed. A monitor sending `HEAD` gets a `404`.
+
+What none of this proves is that a **provider** answers; that takes a real request. The honest zero-cost signal for it is `/stats`: alert on "no success in the last N minutes", or on every entry being `coolingDown` — both come from the traffic you were serving anyway.
 
 ## Manage it
 
@@ -243,7 +304,7 @@ Both percentages ignore the dropped races, so neither punishes a model for being
 
 The rows are always in **your** priority order, the same as the _Models lists_ screen, even when the proxy answering is a background instance still serving an older file. And `last N answered` is the one thing totals cannot tell you: whether anything is being served right now, and by which model — with `TTFT`, the wait before that answer started, and `VIA`, the way it left. That last column reads `direct` when the request went straight out from this machine and `warp` when it went through the tunnel; see [Cloudflare WARP](#cloudflare-warp-which-address-the-providers-see).
 
-**The counters shown are those of the model list in use, and only those.** The models of your other lists keep their own history on disk — switching away from a list does not lose it, and switching back shows it again — but they are never mixed into the list you are reading. If the answering proxy reports models this list does not have, they are counted on a line of their own rather than added to the table: `2 more model(s) served, in another list or another config`.
+**The counters shown are those of the model list in use, and only those.** The models of your other lists keep their own history on disk — switching away from a list does not lose it, and switching back shows it again — but they are never mixed into the list you are reading. If the answering proxy reports models this list does not have, they are counted on a line of their own rather than added to the table: `2 more model(s) served, in another list or another config`. A client asking for `auto - <another list>` reads as exactly that — served, counted, and kept out of the account of the list you are reading.
 
 ### The terminal UI
 
@@ -284,12 +345,12 @@ Everything is keyboard driven: `↑↓` move, `a` add, `e` edit, `space` enable/
 **One chain is rarely enough.** A model list is a named chain, and you can keep several: a cheap one for everyday work, a long one for the day the cheap providers are down, one holding nothing but local models. The line above the table says which one is live, and the keys to the rest are on it:
 
 ```
-  list  ‹ cheap-and-fast ›  2/3
+  list  ‹ cheap-and-fast ›  2/3   auto - cheap-and-fast
   everyday work — free tiers first, nothing metered in the chain
   ←→ switch list · n new list · c copy list · r rename list · w when to use · x delete list
 ```
 
-Every key that acts on a list is written **there**, under the name of the list it acts on — the hints at the foot of the screen are the chain's own keys, and the two are never mixed. `←→` switches the list being served, `n` starts a new empty one, `c` copies the one you are on, `r` renames it, `x` removes it — the name is typed straight into that line, no form, no second screen. The list you switch to becomes the chain the proxy answers with immediately: a background instance picks it up through its config watcher, with no restart, so switching lists **is** how you compare them under real traffic. The other lists sit in the config file untouched until you come back to them.
+Every key that acts on a list is written **there**, under the name of the list it acts on — the hints at the foot of the screen are the chain's own keys, and the two are never mixed. `←→` switches the list being served, `n` starts a new empty one, `c` copies the one you are on, `r` renames it, `x` removes it — the name is typed straight into that line, no form, no second screen. The list you switch to becomes the chain the proxy answers with immediately: a background instance picks it up through its config watcher, with no restart, so switching lists **is** how you compare them under real traffic. The others are not idle while you do — each is served under the `auto - <name>` shown beside its own name, so anything can ask one of them for a single request without changing what everything else gets. Switching decides the default; it does not decide what is available.
 
 | Key  | Does                                                                                                                       |
 | ---- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -318,7 +379,7 @@ Write it for the version of you who has forgotten why the list exists. A copy in
 
 ### `llmfp describe`: the report something else chooses by
 
-The notes are worth writing because something other than you reads them. `llmfp describe` prints every list purpose-first, with the command that serves it underneath — which is all an agent, a deploy script or a colleague needs to pick the right chain without opening the config:
+The notes are worth writing because something other than you reads them. `llmfp describe` prints every list purpose-first, with the id it answers to and the command that makes it the default underneath — which is all an agent, a deploy script or a colleague needs to pick the right chain without opening the config:
 
 ```
 $ llmfp describe
@@ -326,13 +387,16 @@ $ llmfp describe
 
   free-only (1/3 · 11 model(s), 11 enabled)
     everyday work — free tiers first, nothing metered
+    model id  auto - free-only
     llmfp use free-only
 
   paid-fallback (2/3 · 4 model(s), 4 enabled)   serving now
     the day every free tier is out of quota, and it has to answer
+    model id  auto - paid-fallback
 
   on the plane (3/3 · 2 model(s), 2 enabled)
     no note yet — llmfp describe "on the plane" "when this list should serve"
+    model id  auto - on the plane
     llmfp use "on the plane"
 ```
 
@@ -363,7 +427,7 @@ $ llmfp use default
   the background proxy (pid 24188) reads the file on every request, so this is already live
 ```
 
-`use` exits non-zero when the name matches no list, or two, so a deploy script can branch on it; `lists --json` and `use --json` give the same facts as machine-readable output, the note included, which is what a shell picker needs to offer more than bare names.
+`use` exits non-zero when the name matches no list, or two, so a deploy script can branch on it; `lists --json` and `use --json` give the same facts as machine-readable output — the note and the `model` id included, which is what a shell picker, or an agent choosing its own chain, needs to offer more than bare names.
 
 **Press `t` to test every model for real.** Probes start 5 seconds apart to keep rate limits happy, but run in parallel, a model taking 30 seconds only delays its own row. Each one gives up after `probe.timeoutMs` (15 s), which you can raise from the Settings screen without touching what production waits for.
 
@@ -568,7 +632,7 @@ Every screen that takes a key writes it to the `.env` and stores only an `env:NA
 
 ### Model lists in the file
 
-`models` is always the chain being served — the array the proxy reads, and the only one it reads. `modelLists` holds the named lists beside it, and `activeListId` says which of them the live chain belongs to:
+`models` is the chain served by default — what `auto`, the UI and the counters all mean by "the chain". `modelLists` holds the named lists beside it, `activeListId` says which of them the live chain belongs to, and any of them can be asked for by name: `auto - <name>` is served straight from that list's own `models` array, parked or not.
 
 ```jsonc
 {
@@ -591,7 +655,7 @@ Every screen that takes a key writes it to the `.env` and stores only an `env:NA
 }
 ```
 
-So the active entry in `modelLists` is a mirror, refreshed on every save, and `models` wins whenever the two disagree. Editing `models` by hand is therefore always safe and always takes effect; editing the *active* list instead would be overwritten. A file written before model lists existed gets one called `default` on first load, holding the chain it already had.
+So the active entry in `modelLists` is a mirror, refreshed on every save, and `models` wins whenever the two disagree. Editing `models` by hand is therefore always safe and always takes effect; editing the *active* list instead would be overwritten. Editing a **parked** list is safe too, and takes effect for whatever asks for it by name. A file written before model lists existed gets one called `default` on first load, holding the chain it already had.
 
 **A file from 1.6 or earlier calls these `targets`, `activeTargetId` and `tgt_…`.** It is read as it is, renamed on the way in, and written back under the names above the next time anything is saved — nothing to run, and nothing to lose: the id keeps its random half, so the list that was being served still is, and the counters were never keyed on a list id in the first place.
 
@@ -751,7 +815,7 @@ So for **"never serve me anything other than what I asked for"**, you need both:
 
 **Every answer says "no provider could answer".** No usable key. Run `llm-failover-proxy status`: providers whose key is missing are shown in red. Paste keys with `llm-failover-proxy` (wizard, or Providers → `e`), or write them into the `.env`, a running proxy picks them up within a second.
 
-**Is it actually running?** `llm-failover-proxy status` shows the process, its port and its counters; `curl http://127.0.0.1:47821/health` answers `200`. If a port was taken, the real one is in `status` and in `daemon.json`.
+**Is it actually running?** `llm-failover-proxy status` shows the process, its port and its counters; `curl http://127.0.0.1:47821/health` answers `200`. If a port was taken, the real one is in `status` and in `daemon.json`. For a monitor, and for checking that one model list has anything behind it, see [checking it works, without spending a token](#checking-it-works-without-spending-a-token).
 
 **It did not come back after a reboot.** `llm-failover-proxy enable` (re-)registers it. The entry is a plain file you can inspect or delete: `…\Start Menu\Programs\Startup\llm-failover-proxy.vbs` on Windows, `~/Library/LaunchAgents/com.llm-failover-proxy.plist` on macOS, `~/.config/systemd/user/llm-failover-proxy.service` on Linux. On Linux, a user service normally waits for your first login, `loginctl enable-linger $USER` starts it at boot instead.
 

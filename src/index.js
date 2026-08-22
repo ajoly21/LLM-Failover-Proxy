@@ -58,9 +58,9 @@ const HELP = `
 
   ${c.bold("Endpoints")}
     POST /v1/chat/completions   streaming and non-streaming
-    POST /v1/embeddings
-    GET  /v1/models
-    GET  /stats · GET /health
+    POST /v1/embeddings         the entries of kind ${c.bold("embedding")}
+    GET  /v1/models             one ${c.bold("auto - <list>")} id per model list
+    GET  /stats · GET /health   /health?list=<name> checks one list: 200, 503 or 404
 `;
 
 function parseArgs(argv) {

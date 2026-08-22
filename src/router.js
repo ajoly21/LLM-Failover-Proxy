@@ -1,6 +1,6 @@
 import { adapterFor } from "./adapters/index.js";
 import { inspectCompletion, inspectEmbedding } from "./adapters/openai.js";
-import { getProvider, resolveSecret } from "./config.js";
+import { DEFAULT_TARGET_NAME, getProvider, resolveSecret } from "./config.js";
 import { AttemptError, classifyStatus, ClientGoneError, parseRetryAfter, REASONS } from "./errors.js";
 import { c, compact, log, ms } from "./logger.js";
 import { createSseParser, SSE_DONE } from "./sse.js";
@@ -24,24 +24,169 @@ class RaceLost extends Error {
  * Chain resolution                                                    *
  * ------------------------------------------------------------------ */
 
-function usableEntries(config, kind) {
-  return config.models.filter((entry) => {
+/** Entries of a chain that can actually be tried for `kind`, in its own order. */
+function usableFrom(config, models, kind) {
+  return (Array.isArray(models) ? models : []).filter((entry) => {
     if (entry.kind !== kind || !entry.enabled) return false;
     const provider = getProvider(config, entry.providerId);
     return Boolean(provider && provider.enabled && provider.baseUrl);
   });
 }
 
+/** The same, for the chain being served: `config.models`, the live one. */
+function usableEntries(config, kind) {
+  return usableFrom(config, config.models, kind);
+}
+
+/** What `auto` on its own means, and the other words clients send for it. */
+const AUTO_WORDS = ["auto", "default", "proxy"];
+
+/**
+ * The id a model list is served under, and the one `GET /v1/models` shows,
+ * with the pattern that reads it back — clients rewrite ids more than they
+ * admit, so every separator they are likely to leave behind is accepted.
+ */
+const AUTO_ID = /^auto(?:\s*[-–:/|]\s*|\s+)(.+)$/;
+export const autoModelId = (name) => `auto - ${name}`;
+
+/** A name as a client is likely to hand it back: `Cheap and Fast` → `cheapandfast`. */
+const slug = (value) => norm(value).replace(/[^a-z0-9]+/g, "");
+
+/**
+ * Every chain this proxy can be asked for: the one being served first, then the
+ * lists parked beside it.
+ *
+ * The live chain is read from `config.models` and never from its own entry in
+ * `modelLists`: that entry is a mirror refreshed on load and save (see
+ * `syncTargets`), and `models` is what the rest of the proxy serves. A config
+ * assembled by hand — a test, or a file older than model lists — holds no lists
+ * at all, and its chain is still one chain, under the name a migration gives it.
+ */
+export function servedLists(config) {
+  const lists = Array.isArray(config.modelLists) ? config.modelLists : [];
+  if (!lists.length) {
+    return [{ listId: config.activeListId ?? null, name: DEFAULT_TARGET_NAME, description: "", active: true, models: config.models }];
+  }
+  const activeIndex = Math.max(0, lists.findIndex((list) => list.id === config.activeListId));
+  const ordered = [lists[activeIndex], ...lists.filter((_, index) => index !== activeIndex)];
+  return ordered.map((list) => ({
+    listId: list.id,
+    name: list.name,
+    description: list.description || "",
+    active: list.id === config.activeListId,
+    models: list.id === config.activeListId ? config.models : list.models,
+  }));
+}
+
+/**
+ * One chain, named and counted: the id it answers to, and how many of its
+ * entries could actually be tried for each endpoint.
+ *
+ * The counts are the whole point — a list can hold ten models and answer
+ * nothing, because they are disabled, or their provider is. This is what says
+ * so, and what a health check reports.
+ */
+export function describeChain(config, list) {
+  return {
+    id: autoModelId(list.name),
+    listId: list.listId,
+    name: list.name,
+    description: list.description,
+    active: list.active,
+    chat: usableFrom(config, list.models, "chat").length,
+    embedding: usableFrom(config, list.models, "embedding").length,
+  };
+}
+
+/**
+ * The chains a client can name, and what each one has to offer.
+ *
+ * A list holding nothing usable is left out: an id that can only answer `503`
+ * is worse than one line less in a model picker.
+ */
+export function servedChains(config) {
+  return servedLists(config)
+    .map((list) => describeChain(config, list))
+    .filter((chain) => chain.chat || chain.embedding);
+}
+
+/**
+ * The list an outside caller means, by any of the names it could know it under:
+ * the `auto - <name>` id it is served under, the bare name, or the `lst_…` id
+ * from the configuration file. Nothing, or `auto`, means the one being served.
+ *
+ * Names win over the words `auto`, `default` and `proxy` here, the other way
+ * round from `resolveChain`: as a *model*, those words have always meant "the
+ * chain being served", while a caller asking about a *list* means the list —
+ * and `default` is the name every fresh install gives its first one.
+ *
+ * `null` when no list goes by that name, which is an answer in itself: it is
+ * what tells a monitor its client is configured with an id nothing answers to,
+ * rather than letting the fallback chain report somebody else's health.
+ */
+export function findChain(config, wanted) {
+  const lists = servedLists(config);
+  const raw = String(wanted ?? "").trim();
+  const value = norm(raw);
+
+  const byId = lists.find((list) => list.listId && list.listId === raw);
+  if (byId) return byId;
+
+  const named = AUTO_ID.exec(value);
+  const key = named ? named[1].trim() : value;
+  if (key) {
+    const match = lists.find((list) => norm(list.name) === key) ?? lists.find((list) => slug(list.name) === slug(key));
+    if (match) return match;
+  }
+  // `auto` on its own, or nothing at all: whichever list is being served.
+  if (!named && (!value || AUTO_WORDS.includes(value))) return lists.find((list) => list.active) ?? lists[0] ?? null;
+  return null;
+}
+
+/**
+ * Reads a requested model as the name of a chain.
+ *
+ * `auto` alone is the list being served, which is what it has always meant.
+ * `auto - embeddings` is the list of that name, served whether or not it is the
+ * active one — which is what lets one client ask for the chat chain while
+ * another asks for the embedding one, with nothing switched in between. Clients
+ * rewrite ids more than they admit, so the separator is loose and the names are
+ * compared on their letters and digits.
+ *
+ * `null` when this is not one of our ids, an unknown list name included: an
+ * alias may perfectly well start with `auto-`, and the caller goes on to match
+ * it as one.
+ */
+function readListId(config, requested) {
+  const value = norm(requested);
+  if (!value || AUTO_WORDS.includes(value)) return { list: null };
+  const named = AUTO_ID.exec(value);
+  if (!named) return null;
+  const wanted = named[1].trim();
+  const lists = servedLists(config);
+  const list = lists.find((entry) => norm(entry.name) === wanted) ?? lists.find((entry) => slug(entry.name) === slug(wanted)) ?? null;
+  return list ? { list } : null;
+}
+
 /**
  * Builds the ordered attempt list for a requested `model`.
- * The order of `config.models` IS the priority order.
+ * The order of a chain IS its priority order.
  */
 export function resolveChain(config, requestedModel, kind = "chat") {
-  const pool = usableEntries(config, kind);
   const requested = String(requestedModel || "").trim();
-  const isAuto = !requested || ["auto", "default", "proxy"].includes(norm(requested));
+  const asChain = readListId(config, requested);
 
-  if (isAuto) return { entries: pool, matched: "auto", notFound: false };
+  if (asChain?.list) {
+    return {
+      entries: usableFrom(config, asChain.list.models, kind),
+      matched: autoModelId(asChain.list.name),
+      notFound: false,
+      list: asChain.list.name,
+    };
+  }
+
+  const pool = usableEntries(config, kind);
+  if (asChain) return { entries: pool, matched: "auto", notFound: false, list: null };
 
   const byAlias = pool.filter((entry) => norm(entry.alias) === norm(requested));
   const byModel = pool.filter((entry) => norm(entry.model) === norm(requested));
@@ -53,11 +198,11 @@ export function resolveChain(config, requestedModel, kind = "chat") {
   const primary = byAlias.length ? byAlias : byModel.length ? byModel : byPath;
 
   if (!primary.length) {
-    if (config.failover.strictModelMatch) return { entries: [], matched: requested, notFound: true };
-    return { entries: pool, matched: `${requested} (unknown → default chain)`, notFound: false };
+    if (config.failover.strictModelMatch) return { entries: [], matched: requested, notFound: true, list: null };
+    return { entries: pool, matched: `${requested} (unknown → default chain)`, notFound: false, list: null };
   }
   const rest = config.failover.crossModelFallback ? pool.filter((entry) => !primary.includes(entry)) : [];
-  return { entries: [...primary, ...rest], matched: requested, notFound: false };
+  return { entries: [...primary, ...rest], matched: requested, notFound: false, list: null };
 }
 
 /** Ready entries first; benched ones kept as a last resort. */
@@ -70,14 +215,38 @@ function orderByAvailability(entries) {
 }
 
 /**
- * Catalogue exposed to clients: `auto`, then one id per alias, in priority
- * order. The `provider/model` form stays accepted as input (see
- * `resolveChain`) but is not listed: it would duplicate the alias, and produce
- * unreadable ids when the model name already contains a slash
+ * Catalogue exposed to clients: one `auto - <list>` per model list, the one
+ * being served first, then one id per alias of that live chain, in priority
+ * order.
+ *
+ * A list carries an id of its own so the choice of chain belongs to the client:
+ * an agent asks `auto - embeddings` for what it embeds with and `auto - default`
+ * for what it talks to, and neither has to be the list the UI calls active.
+ * `auto` on its own is still accepted as input, it is simply not advertised any
+ * more — it names no chain, so a client showing it says nothing about which one
+ * answered.
+ *
+ * The `provider/model` form stays accepted as input too (see `resolveChain`)
+ * but is not listed: it would duplicate the alias, and produce unreadable ids
+ * when the model name already contains a slash
  * (e.g. `openrouter/nvidia/nemotron-3:free`).
  */
 export function listModels(config) {
-  const seen = new Map(); // normalized key -> exposed entry (case-insensitive dedupe)
+  const seen = new Map(); // normalized id -> exposed entry (case-insensitive dedupe)
+
+  for (const chain of servedChains(config)) {
+    if (seen.has(norm(chain.id))) continue; // two lists of one name: the served one wins
+    seen.set(norm(chain.id), {
+      id: chain.id,
+      object: "model",
+      created: 0,
+      owned_by: "llm-proxy",
+      // The list's own note, the line `llmfp describe` prints: what something
+      // that did not build these chains has to pick by.
+      ...(chain.description ? { description: chain.description } : {}),
+    });
+  }
+
   for (const entry of usableEntries(config, "chat").concat(usableEntries(config, "embedding"))) {
     const id = (entry.alias || entry.model || "").trim();
     if (!id || seen.has(norm(id))) continue;
@@ -88,7 +257,8 @@ export function listModels(config) {
       owned_by: getProvider(config, entry.providerId)?.name || "llm-proxy",
     });
   }
-  return [{ id: "auto", object: "model", created: 0, owned_by: "llm-proxy" }, ...seen.values()];
+
+  return [...seen.values()];
 }
 
 /* ------------------------------------------------------------------ *
@@ -460,7 +630,7 @@ async function raceWithTimer(promises, delayMs) {
  * @returns {Promise<{type: 'json'|'stream'|'error'} & Record<string, any>>}
  */
 export async function run({ config, body, kind = "chat", sink = null, clientGone, requestId = "-", plan = null }) {
-  const { entries, matched, notFound } = resolveChain(config, body.model, kind);
+  const { entries, matched, notFound, list } = resolveChain(config, body.model, kind);
 
   if (notFound) {
     return {
@@ -475,7 +645,9 @@ export async function run({ config, body, kind = "chat", sink = null, clientGone
     return {
       type: "error",
       status: 503,
-      message: `No ${kind} model configured or enabled. Run the CLI to add one (\`npx llm-failover-proxy\`).`,
+      // Which chain came up empty, when the client named one: a list of embedding
+      // models asked for a chat answer is a real mix-up, and its name is the clue.
+      message: `No ${kind} model configured or enabled${list ? ` in the model list "${list}"` : ""}. Run the CLI to add one (\`npx llm-failover-proxy\`).`,
       errorType: "no_backend",
       attempts: [],
     };

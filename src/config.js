@@ -445,6 +445,26 @@ export function knownModelIds(config) {
   return ids;
 }
 
+/**
+ * Every model entry any list holds, keyed by id, the live chain first and each
+ * one carrying the name of the list it belongs to.
+ *
+ * What a reader needs to name a model it only has counters for: a client can ask
+ * for `auto - <list>` and be served by a chain that is not the live one, so an
+ * id coming back from the engine is no longer necessarily in `models`.
+ */
+export function modelEntryIndex(config) {
+  const lists = Array.isArray(config.modelLists) ? config.modelLists : [];
+  const active = lists.find((list) => list.id === config.activeListId) ?? null;
+  const index = new Map();
+  for (const entry of config.models) index.set(entry.id, { ...entry, list: active?.name ?? null });
+  for (const list of lists) {
+    if (list.id === config.activeListId) continue;
+    for (const entry of list.models) if (!index.has(entry.id)) index.set(entry.id, { ...entry, list: list.name });
+  }
+  return index;
+}
+
 export function renameTarget(config, targetId, name) {
   const target = config.modelLists.find((entry) => entry.id === targetId);
   if (!target) return false;

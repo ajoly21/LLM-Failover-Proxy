@@ -116,15 +116,16 @@ test('config survives a disk round-trip and keeps its order', async () => {
   assert.deepEqual(reloaded.models.map((entry) => entry.model), ['bb', 'aa']);
   assert.equal(moveModel(reloaded, 0, -1), false, 'no out-of-bounds move');
 
-  // Exposed catalogue: `auto` then one alias per entry, in priority order.
-  assert.deepEqual(listModels(reloaded).map((entry) => entry.id), ['auto', 'y', 'x']);
+  // Exposed catalogue: the chain under its list's own id, then one alias per
+  // entry, in priority order.
+  assert.deepEqual(listModels(reloaded).map((entry) => entry.id), ['auto - default', 'y', 'x']);
 
   // Two entries sharing an alias = one failover group, exposed once.
   reloaded.models.forEach((entry) => {
     entry.alias = 'group';
   });
   assert.deepEqual(resolveChain(reloaded, 'group', 'chat').entries.map((entry) => entry.model), ['bb', 'aa']);
-  assert.deepEqual(listModels(reloaded).map((entry) => entry.id), ['auto', 'group']);
+  assert.deepEqual(listModels(reloaded).map((entry) => entry.id), ['auto - default', 'group']);
 
   await fs.rm(dir, { recursive: true, force: true });
 });
@@ -322,4 +323,64 @@ test('stats live next to their config file', () => {
     statsPathFor(path.join('/tmp', 'llm-proxy.config.json')),
     path.join('/tmp', 'llm-proxy.config.stats.json'),
   );
+});
+
+test('every model list is served under an id of its own', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-proxy-ids-'));
+  const file = path.join(dir, 'config.json');
+  const provider = { id: 'prov_1', name: 'p', type: 'openai', baseUrl: 'http://127.0.0.1:9/v1', apiKey: null, headers: {}, enabled: true };
+  const entry = (model, kind = 'chat') => ({ id: `mdl_${model}`, providerId: 'prov_1', model, alias: model, kind, enabled: true, params: {} });
+  await fs.writeFile(file, JSON.stringify({ providers: [provider], models: [entry('chat-1')] }));
+
+  // A second list, holding what nothing in the live chain can do: embeddings.
+  const config = loadConfig(file);
+  const embeddings = addTarget(config, 'embeddings');
+  config.models.push(entry('embed-1', 'embedding'));
+  describeTarget(config, embeddings.id, 'what everything is embedded with');
+  switchTarget(config, config.modelLists[0].id); // the chat chain goes back to being the live one
+  saveConfig(config, file);
+
+  const served = loadConfig(file);
+  // The chain being served comes first, so a client taking the first id it is
+  // offered lands on the list the UI calls active. Aliases are the live chain's:
+  // `embed-1` sits in another list, and is reached by asking for that list.
+  assert.deepEqual(listModels(served).map((m) => m.id), ['auto - default', 'auto - embeddings', 'chat-1']);
+  assert.equal(
+    listModels(served).find((m) => m.id === 'auto - embeddings').description,
+    'what everything is embedded with',
+    "the list's own note, which is what something that did not build these chains picks by",
+  );
+
+  // Asking for a list serves that list, active or not, and the kind of request
+  // decides which of its models can answer.
+  assert.deepEqual(resolveChain(served, 'auto - embeddings', 'embedding').entries.map((m) => m.model), ['embed-1']);
+  assert.deepEqual(resolveChain(served, 'auto - embeddings', 'chat').entries, [], 'a list of embedding models has no chat chain');
+  assert.equal(resolveChain(served, 'auto - embeddings', 'chat').list, 'embeddings', 'and says which list came up empty');
+  assert.deepEqual(resolveChain(served, 'auto', 'chat').entries.map((m) => m.model), ['chat-1'], '`auto` still means the chain being served');
+  assert.deepEqual(resolveChain(served, 'auto - default', 'chat').entries.map((m) => m.model), ['chat-1']);
+
+  // Clients rewrite ids more than they admit: the separator is loose, and names
+  // are compared on their letters and digits.
+  for (const asked of ['auto-embeddings', 'AUTO : Embeddings', 'auto/embeddings', 'auto embeddings']) {
+    assert.deepEqual(resolveChain(served, asked, 'embedding').entries.map((m) => m.model), ['embed-1'], asked);
+  }
+
+  // An alias may perfectly well start with `auto-`: no list of that name means
+  // it is matched as what it is.
+  served.models.push({ ...entry('fixer'), alias: 'auto-fix' });
+  assert.deepEqual(resolveChain(served, 'auto-fix', 'chat').entries.map((m) => m.model), ['fixer', 'chat-1']);
+  served.models.pop();
+
+  // An unknown list name is an unknown model, and treated as one.
+  assert.equal(resolveChain(served, 'auto - nope', 'chat').matched, 'auto - nope (unknown → default chain)');
+  served.failover.strictModelMatch = true;
+  assert.equal(resolveChain(served, 'auto - nope', 'chat').notFound, true);
+  served.failover.strictModelMatch = false;
+
+  // A list holding nothing usable is not offered: an id that can only answer a
+  // 503 is worse than one line less in a model picker.
+  served.modelLists[1].models[0].enabled = false;
+  assert.deepEqual(listModels(served).map((m) => m.id), ['auto - default', 'chat-1']);
+
+  await fs.rm(dir, { recursive: true, force: true });
 });

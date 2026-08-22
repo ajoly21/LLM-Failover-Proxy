@@ -244,9 +244,12 @@ test("a chain parked in another model list keeps its counters across a restart",
       assert.ok(after.entries.mdl_parked, "and the parked list's history is still there");
       assert.equal(after.entries.mdl_parked.successes, 1, "unchanged, since nothing reached it");
 
-      // Kept on disk, but not counted against the list in use.
+      // Kept on disk and reported, but never counted against the list in use: the
+      // live chain first, then what another list served, on a row of its own —
+      // which is what /stats has to say now a client can ask for that list by name.
       const stats = await getStats(restarted);
-      assert.deepEqual(stats.chain.map((row) => row.model), ["m-2"]);
+      assert.deepEqual(stats.chain.map((row) => row.model), ["m-2", "m-1"]);
+      assert.equal(stats.chain[1].list, "served-before");
       assert.equal(stats.totals.successes, 1);
     } finally {
       await restarted.stop();

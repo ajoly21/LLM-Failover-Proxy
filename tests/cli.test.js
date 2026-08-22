@@ -130,7 +130,7 @@ test("`lists` names the model lists, and `use` serves another one", async () => 
 
   const served = async () => {
     const answer = await fetch(`${proxy.url}/v1/models`).then((response) => response.json());
-    return answer.data.filter((entry) => entry.id !== "auto").map((entry) => entry.id);
+    return answer.data.filter((entry) => !entry.id.startsWith("auto")).map((entry) => entry.id);
   };
 
   try {

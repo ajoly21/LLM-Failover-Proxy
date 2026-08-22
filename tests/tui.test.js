@@ -435,7 +435,7 @@ test('a second model list is added, named in place, and reached with the arrows'
     assert.match(app.frame(), /new: cheap/, 'typed in place, not on another screen');
     await app.press(KEY.enter);
 
-    assert.match(app.frame(), /list\s+‹ cheap ›\s+2\/2/);
+    assert.match(app.frame(), /list\s+‹ cheap ›\s+2\/2\s+auto - cheap/, "named, numbered, and under the id a client asks for it by");
     assert.deepEqual(chain(), [], 'the new list starts empty');
     assert.deepEqual(app.config().modelLists.map((entry) => entry.name), ['default', 'cheap']);
     assert.deepEqual(app.config().modelLists[0].models.map((entry) => entry.model), ['first', 'second'], 'the first chain was parked, not lost');

@@ -14,6 +14,7 @@ import {
   renameTarget,
 } from "../../config.js";
 import { probeModel } from "../../probe.js";
+import { autoModelId } from "../../router.js";
 import { h } from "../h.js";
 import { useLayout } from "../size.js";
 import { COLOR, SYMBOL, duration } from "../theme.js";
@@ -302,6 +303,9 @@ export function ModelsScreen({ config, update, notify, navigate, onBack, spacing
             h(Text, { bold: true }, list?.name ?? DEFAULT_TARGET_NAME),
             h(Text, { color: COLOR.accent }, listCount > 1 ? " ›" : ""),
             h(Text, { dimColor: true }, `  ${listIndex + 1}/${listCount}`),
+            // What a client asks for to be served by this list, switched to or
+            // not: the name on its own does not say what to type into an agent.
+            layout.narrow ? null : h(Text, { dimColor: true }, `   ${autoModelId(list?.name ?? DEFAULT_TARGET_NAME)}`),
           ),
     ),
     // Truncated, never wrapped: it is one line by definition, and a note that

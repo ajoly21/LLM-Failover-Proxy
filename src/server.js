@@ -2,13 +2,13 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { getProvider, knownModelIds, loadConfig, resolveSecret, statsPathFor } from "./config.js";
+import { getProvider, knownModelIds, loadConfig, modelEntryIndex, resolveSecret, statsPathFor } from "./config.js";
 import { clearRuntime, writeRuntime } from "./daemon.js";
 import { envPathFor, loadEnvFiles } from "./env.js";
 import { openAIError } from "./errors.js";
 import { c, log, setLogLevel } from "./logger.js";
 import { findAvailablePort } from "./net.js";
-import { failureFrames, listModels, run } from "./router.js";
+import { autoModelId, describeChain, failureFrames, findChain, listModels, run, servedChains, servedLists } from "./router.js";
 import { createGoneSignal } from "./signal.js";
 import { statsFile as currentStatsFile, enableStatsPersistence, recentCalls, snapshot, stateFor, statsSince } from "./state.js";
 import { startRotationSchedule, syncTunnel, warpEnabled, warpSummary } from "./warp/index.js";
@@ -164,10 +164,85 @@ function createSink(res, config) {
   };
 }
 
+const SERVICE = "llm-failover-proxy";
+
+/** Kinds a health check can be narrowed to, beside "any". */
+const KINDS = ["chat", "embedding"];
+
+/**
+ * Health of one chain, for a monitor that has to know more than "the process is
+ * listening": whether the id its application is configured with has anything
+ * behind it.
+ *
+ * `?list=` — or `?model=`, the same thing under the name a client knows it by —
+ * takes the `auto - <name>` id, the bare list name, or the `lst_…` id from the
+ * file. `?kind=` narrows it to what one endpoint can use, which is the whole
+ * question for a list of embedding models. Nothing named means the chain being
+ * served, so `?kind=chat` alone is "can this proxy answer a chat request at
+ * all".
+ *
+ * The status code carries the verdict, so a probe can branch on it alone and
+ * never parse the body: `404` for a list that does not exist, `503` for one
+ * that cannot answer, `200` when it can. A name that matches nothing is never
+ * quietly answered by the fallback chain — that would report somebody else's
+ * health under the asked-for name.
+ *
+ * No key is required, exactly like `/health` itself: a probe should not need a
+ * secret to say whether the thing is up. Names are only *enumerated* to a caller
+ * that could have read them from the config anyway.
+ */
+function chainHealth(config, req, asked, kindAsked) {
+  const wanted = String(kindAsked ?? "").trim().toLowerCase();
+  const kind = !wanted || wanted === "any" ? null : wanted;
+  if (kind && !KINDS.includes(kind)) {
+    return [400, { status: "invalid", service: SERVICE, message: `kind must be "chat", "embedding" or "any", not "${kindAsked}"` }];
+  }
+
+  const list = findChain(config, asked);
+  if (!list) {
+    return [
+      404,
+      {
+        status: "unknown",
+        service: SERVICE,
+        message: `no model list called "${asked}"`,
+        // Spelled out for whoever is allowed to read the configuration: a typo
+        // in a probe is only obvious next to the ids that do exist.
+        ...(authorized(config, req) ? { lists: servedLists(config).map((entry) => autoModelId(entry.name)) } : {}),
+      },
+    ];
+  }
+
+  const chain = describeChain(config, list);
+  const models = kind ? chain[kind] : chain.chat + chain.embedding;
+  const what = kind ? `${kind} model` : "model";
+  return [
+    models > 0 ? 200 : 503,
+    {
+      status: models > 0 ? "ok" : "unavailable",
+      service: SERVICE,
+      // Echoed as the id a client asks for, so a probe can be configured with
+      // the very string its application sends.
+      model: chain.id,
+      list: chain.name,
+      active: chain.active,
+      kind: kind ?? "any",
+      models,
+      chat: chain.chat,
+      embedding: chain.embedding,
+      ...(chain.description ? { description: chain.description } : {}),
+      ...(models > 0 ? {} : { message: `the model list "${chain.name}" has no usable ${what}: nothing enabled, on an enabled provider with a base URL` }),
+    },
+  ];
+}
+
 /** The last answered requests, named: ids mean nothing to a reader. */
 function recentPayload(config) {
+  // Every list, and not just the live chain: `auto - <list>` lets an answer come
+  // from a model this chain does not hold, and a row of nulls names nothing.
+  const known = modelEntryIndex(config);
   return recentCalls().map(({ id, at, ttftMs, via, escalated }) => {
-    const entry = config.models.find((model) => model.id === id);
+    const entry = known.get(id) ?? null;
     return {
       id,
       at,
@@ -175,6 +250,8 @@ function recentPayload(config) {
       provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
       model: entry?.model ?? null,
       alias: entry?.alias ?? null,
+      // Which list it was served from, since that is no longer always this one.
+      list: entry?.list ?? null,
       // Which way this one left. Added, never substituted: a reader built
       // against an older proxy sees it missing and says so, rather than
       // misreading another field.
@@ -189,33 +266,61 @@ function statsPayload(config) {
   const snap = snapshot();
   const now = Date.now();
   const totals = { requests: 0, successes: 0, failures: 0, cancelled: 0, tokens: 0 };
-  return {
-    uptimeSec: Math.round(process.uptime()),
-    // Counters are persisted, so they usually predate this process.
-    statsSince: statsSince(),
-    totals,
-    // Where requests go out, so a reader does not have to open the config file
-    // to know what the `via` of each row below is supposed to say.
-    warp: warpSummary(config),
-    recent: recentPayload(config),
-    providers: config.providers.map((p) => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, enabled: p.enabled })),
-    chain: config.models.map((entry, index) => {
-      const state = snap[entry.id] || stateFor(entry.id);
-      totals.requests += state.requests;
-      totals.successes += state.successes;
-      totals.failures += state.failures;
-      totals.cancelled += state.cancelled;
-      totals.tokens += state.tokens;
+
+  const chain = config.models.map((entry, index) => {
+    const state = snap[entry.id] || stateFor(entry.id);
+    totals.requests += state.requests;
+    totals.successes += state.successes;
+    totals.failures += state.failures;
+    totals.cancelled += state.cancelled;
+    totals.tokens += state.tokens;
+    return {
+      // The id lets a reader line these counters up with its own configuration
+      // rather than trusting this order, which is only ours.
+      id: entry.id,
+      priority: index + 1,
+      alias: entry.alias,
+      model: entry.model,
+      kind: entry.kind,
+      provider: getProvider(config, entry.providerId)?.name ?? null,
+      enabled: entry.enabled,
+      requests: state.requests,
+      successes: state.successes,
+      failures: state.failures,
+      cancelled: state.cancelled,
+      lastLatencyMs: state.lastLatencyMs,
+      lastUsedAt: state.lastUsedAt ?? null,
+      tokens: state.tokens,
+      coolingDown: state.cooldownUntil > now,
+      cooldownMsLeft: Math.max(0, state.cooldownUntil - now),
+      lastError: state.lastError,
+    };
+  });
+
+  /**
+   * What another list served, on rows of its own.
+   *
+   * A client asking for `auto - <list>` is served by a chain this table does not
+   * hold, and dropping those counters would make /stats say the requests never
+   * happened. They stay out of `totals`, which is the live list's own account:
+   * every reader already puts the rows it does not recognise at the end and
+   * counts them as "served elsewhere".
+   */
+  const own = new Set(config.models.map((entry) => entry.id));
+  const known = modelEntryIndex(config);
+  const elsewhere = Object.entries(snap)
+    .filter(([id, state]) => !own.has(id) && (state.requests || state.successes || state.failures || state.cancelled))
+    .map(([id, state], index) => {
+      const entry = known.get(id) ?? null;
       return {
-        // The id lets a reader line these counters up with its own configuration
-        // rather than trusting this order, which is only ours.
-        id: entry.id,
-        priority: index + 1,
-        alias: entry.alias,
-        model: entry.model,
-        kind: entry.kind,
-        provider: getProvider(config, entry.providerId)?.name ?? null,
-        enabled: entry.enabled,
+        id,
+        priority: chain.length + index + 1,
+        alias: entry?.alias ?? null,
+        model: entry?.model ?? null,
+        kind: entry?.kind ?? null,
+        provider: entry ? (getProvider(config, entry.providerId)?.name ?? null) : null,
+        list: entry?.list ?? null,
+        enabled: entry?.enabled ?? false,
         requests: state.requests,
         successes: state.successes,
         failures: state.failures,
@@ -227,7 +332,19 @@ function statsPayload(config) {
         cooldownMsLeft: Math.max(0, state.cooldownUntil - now),
         lastError: state.lastError,
       };
-    }),
+    });
+
+  return {
+    uptimeSec: Math.round(process.uptime()),
+    // Counters are persisted, so they usually predate this process.
+    statsSince: statsSince(),
+    totals,
+    // Where requests go out, so a reader does not have to open the config file
+    // to know what the `via` of each row below is supposed to say.
+    warp: warpSummary(config),
+    recent: recentPayload(config),
+    providers: config.providers.map((p) => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, enabled: p.enabled })),
+    chain: [...chain, ...elsewhere],
   };
 }
 
@@ -303,12 +420,27 @@ export function createServer({ configFile, statsFile } = {}) {
 
     try {
       if (req.method === "GET" && (endpoint === "/" || endpoint === "/health")) {
+        // Asking about one chain is a different question from "are you there",
+        // and gets a different answer: see `chainHealth`.
+        const asked = url.searchParams.get("list") ?? url.searchParams.get("model");
+        const kindAsked = url.searchParams.get("kind");
+        if (asked !== null || kindAsked !== null) {
+          const [status, payload] = chainHealth(config, req, asked, kindAsked);
+          sendJson(res, config, status, payload);
+          return;
+        }
         sendJson(res, config, 200, {
           status: "ok",
-          service: "llm-failover-proxy",
+          service: SERVICE,
           endpoints: ["/v1/models", "/v1/chat/completions", "/v1/embeddings", "/stats", "/health"],
           chatModels: config.models.filter((m) => m.kind === "chat" && m.enabled).length,
+          // The same count for the other endpoint, which `chatModels` said
+          // nothing about — a list can hold nothing but embedding models.
+          embeddingModels: config.models.filter((m) => m.kind === "embedding" && m.enabled).length,
           providers: config.providers.filter((p) => p.enabled).length,
+          // Every list and what it could answer, so one request is enough to see
+          // that each id a client is configured with has something behind it.
+          ...(authorized(config, req) ? { lists: servedLists(config).map((list) => describeChain(config, list)) } : {}),
         });
         return;
       }
@@ -473,6 +605,15 @@ export async function startServer({ configFile, statsFile, port, host } = {}) {
   log.raw("");
   log.raw(`  ${c.bold(c.green("llm-failover-proxy"))} listening on ${c.bold(c.cyan(base))}`);
   log.raw(`  ${c.gray("client base URL")}  ${base}/v1`);
+  // What goes in the client's model field. `auto` still answers and is
+  // deliberately not printed: it names no list, so it says nothing about which
+  // chain served the answer.
+  const chains = servedChains(config);
+  if (chains.length) {
+    log.raw(
+      `  ${c.gray("model ids      ")}  ` + chains.map((chain) => `${c.bold(chain.id)}${chain.active ? c.gray(" (active)") : ""}`).join(c.gray(" · ")),
+    );
+  }
   log.raw(`  ${c.gray("proxy API key  ")}  ${resolveSecret(config.server.apiKey) ? "required" : c.yellow("not required (open on localhost)")}`);
   log.raw(`  ${c.gray("config         ")}  ${config.__file}`);
   const envFiles = loadEnvFiles({ configFile: config.__file }).files;
